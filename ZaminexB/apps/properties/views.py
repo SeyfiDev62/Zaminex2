@@ -16,7 +16,12 @@ from apps.common.fuzzy_search import apply_fuzzy_search
 from apps.common.metrics import annotate_effective_prices, effective_sale_price as _sale_price
 
 from .permissions import consultant_required
-from .models import Property, PropertyAppraisalReport, PropertyImage
+from .models import (
+    Property,
+    PropertyAppraisalReport,
+    PropertyImage,
+    _generate_next_internal_code,
+)
 
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
@@ -251,6 +256,21 @@ class PropertyViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_403_FORBIDDEN,
             )
         return super().destroy(request, *args, **kwargs)
+
+    @action(detail=False, methods=["get"], url_path="next-internal-code")
+    def next_internal_code(self, request):
+        """Preview the internal code the next created property will be
+        registered with.
+
+        The "افزودن ملک" wizard shows this in its read-only «کد داخلی» field.
+        It is computed by the exact same generator that ``Property.save``
+        runs at insert time, so the preview matches the stored code — and if
+        a concurrent creation happens between the preview and the save, the
+        save simply assigns the following code, so nothing can collide. The
+        code itself is never accepted from the client: the serializer field
+        is read-only.
+        """
+        return Response({"internalCode": _generate_next_internal_code()})
 
     @action(detail=True, methods=["post"], url_path="toggle-shared")
     def toggle_shared(self, request, pk=None):

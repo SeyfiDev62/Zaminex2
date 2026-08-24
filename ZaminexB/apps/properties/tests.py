@@ -646,3 +646,91 @@ class PropertyAppraisalReportApiTests(TestCase):
         allowed = Client()
         allowed.force_login(self.owner)
         self.assertEqual(allowed.get(f"/media/{rel}").status_code, 200)
+
+
+class NextInternalCodePreviewTests(TestCase):
+    """The wizard's read-only «کد داخلی» field previews the exact code the
+    next property will be registered with.
+
+    The preview endpoint must run the same generator as ``Property.save`` so
+    the code shown in the form is the code that lands in the database, the
+    client can never override the code (the serializer field is read-only),
+    and the sequence rules (starts at ZF_1111, never contains a zero digit)
+    hold.
+    """
+
+    URL = "/properties/api/properties/next-internal-code/"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="code-admin", password="pw", role="ADMIN"
+        )
+        self.agent = User.objects.create_user(
+            username="code-agent", password="pw", role="AGENT"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _preview(self, client=None):
+        resp = (client or self.client).get(self.URL)
+        self.assertEqual(resp.status_code, 200, resp.content[:400])
+        return resp.json()["internalCode"]
+
+    def test_first_code_is_start_of_sequence(self):
+        self.assertEqual(self._preview(), "ZF_1111")
+
+    def test_preview_matches_the_code_stored_on_save(self):
+        previewed = self._preview()
+        created = self.client.post(
+            "/properties/api/properties/",
+            {
+                "title": "ملک پیش‌نمایش کد",
+                "internalCode": "FORGED-1",  # client-provided: must be ignored
+                "type": "APARTMENT",
+                "transactionType": "SALE",
+                "area": 80,
+                "fullAddress": "ساری",
+                "ownerFirstName": "علی",
+                "ownerLastName": "رضایی",
+                "ownerPhone": "09121234567",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.content[:400])
+        self.assertEqual(created.json()["internalCode"], previewed)
+
+    def test_preview_advances_after_a_creation(self):
+        self._preview()
+        Property.objects.create(
+            title="ملک دوم",
+            internal_code="ZF_1111",
+            consultant=self.agent,
+            property_type="APARTMENT",
+            deal_type="SALE",
+            area=80,
+            address="ساری",
+        )
+        self.assertEqual(self._preview(), "ZF_1112")
+
+    def test_preview_skips_codes_containing_zero(self):
+        for code in ("ZF_1118", "ZF_1119"):
+            Property.objects.create(
+                title=f"ملک {code}",
+                internal_code=code,
+                consultant=self.agent,
+                property_type="APARTMENT",
+                deal_type="SALE",
+                area=80,
+                address="ساری",
+            )
+        self.assertEqual(self._preview(), "ZF_1121")
+
+    def test_agent_can_preview_too(self):
+        agent_client = APIClient()
+        agent_client.force_authenticate(user=self.agent)
+        self.assertEqual(self._preview(agent_client), "ZF_1111")
+
+    def test_anonymous_cannot_preview(self):
+        anon = APIClient()
+        resp = anon.get(self.URL)
+        self.assertEqual(resp.status_code, 403)

@@ -81,6 +81,26 @@ function AddPropertyWizard({
     }
   }, [catalog, form.propertyTypeRef]);
 
+  // The internal code is assigned by the server (the API field is read-only);
+  // this only previews what the new property will be registered with, so the
+  // read-only «کد داخلی» field shows the real upcoming code instead of an
+  // empty placeholder. The wizard remounts each time the form is opened, so
+  // every new property gets a fresh, up-to-date code. If the call fails the
+  // field stays empty and the server assigns the code at save time, as before.
+  useEffect(() => {
+    if (!csrfToken) return;
+    let cancelled = false;
+    apiFetch("/properties/api/properties/next-internal-code/", { method: "GET" }, csrfToken)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data?.internalCode) {
+          setForm((p) => ({ ...p, internalCode: data.internalCode }));
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [csrfToken]);
+
   const total = 5;
   const labels = ["اطلاعات پایه", "جزئیات", "موقعیت", "رسانه", "بررسی نهایی"];
   // Landing page after submit/cancel: admins own the "properties" center,
@@ -280,7 +300,7 @@ function AddPropertyWizard({
             <h2 className="text-base font-semibold mb-1">اطلاعات پایه</h2>
             <Input label="عنوان ملک" placeholder="مثال: برج مسکونی نیاوران - واحد ۱۲۰۴" value={form.title} onChange={(v) => set("title", v)} error={fieldErrors.title} required />
             <div className="grid grid-cols-2 gap-4">
-              <Input label="کد داخلی" placeholder="مثال: ZX-1204-NY" value={form.internalCode} onChange={() => {}} readOnly error={fieldErrors.internalCode} required />
+              <Input label="کد داخلی" placeholder="در حال تخصیص توسط سیستم…" value={form.internalCode} onChange={() => {}} readOnly error={fieldErrors.internalCode} required />
               <SelectField
                 label="نوع ملک"
                 value={form.propertyTypeRef}
