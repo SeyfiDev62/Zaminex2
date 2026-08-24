@@ -1,4 +1,5 @@
 import shutil
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -734,3 +735,93 @@ class NextInternalCodePreviewTests(TestCase):
         anon = APIClient()
         resp = anon.get(self.URL)
         self.assertEqual(resp.status_code, 403)
+
+
+class DuplicateLocationApiTests(TestCase):
+    """A property's coordinates must be unique across the system: two
+    properties registered at exactly the same location would overlap on
+    every map. The error must be a clear Persian message."""
+
+    BASE = {
+        "type": "APARTMENT",
+        "transactionType": "SALE",
+        "area": 80,
+        "fullAddress": "ساری، بلوار کشاورز",
+        "ownerFirstName": "علی",
+        "ownerLastName": "رضایی",
+        "ownerPhone": "09121234567",
+    }
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="duploc-admin", password="pw", role="ADMIN"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _create(self, **extra):
+        payload = {"title": "ملک موقعیت", **self.BASE, **extra}
+        return self.client.post("/properties/api/properties/", payload, format="json")
+
+    def test_duplicate_location_is_rejected_on_create(self):
+        first = self._create(title="ملک اول", latitude="36.563421", longitude="53.060112")
+        self.assertEqual(first.status_code, 201, first.content[:400])
+
+        second = self._create(title="ملک دوم", latitude="36.563421", longitude="53.060112")
+        self.assertEqual(second.status_code, 400, second.content[:400])
+        body = second.json()
+        # A clear Persian error naming the conflicting property.
+        message = " ".join(
+            item for v in body.values() if isinstance(v, list) for item in v
+        )
+        self.assertIn("یکی باشد", message)
+        self.assertIn("ملک اول", message)
+        self.assertEqual(Property.objects.count(), 1)
+
+    def test_different_locations_are_allowed(self):
+        first = self._create(title="ملک اول", latitude="36.563421", longitude="53.060112")
+        second = self._create(title="ملک دوم", latitude="36.563422", longitude="53.060112")
+        self.assertEqual(first.status_code, 201, first.content[:400])
+        self.assertEqual(second.status_code, 201, second.content[:400])
+        self.assertEqual(Property.objects.count(), 2)
+
+    def test_update_to_another_property_location_is_rejected(self):
+        first = self._create(title="ملک اول", latitude="36.563421", longitude="53.060112")
+        second = self._create(title="ملک دوم", latitude="35.689198", longitude="51.389973")
+        second_id = second.json()["id"]
+
+        moved = self.client.patch(
+            f"/properties/api/properties/{second_id}/",
+            {"latitude": "36.563421", "longitude": "53.060112"},
+            format="json",
+        )
+        self.assertEqual(moved.status_code, 400, moved.content[:400])
+        self.assertEqual(
+            Property.objects.get(pk=second_id).latitude, Decimal("35.689198")
+        )
+
+    def test_update_keeping_its_own_location_is_allowed(self):
+        created = self._create(title="ملک ثابت", latitude="36.563421", longitude="53.060112")
+        prop_id = created.json()["id"]
+
+        retitled = self.client.patch(
+            f"/properties/api/properties/{prop_id}/",
+            {
+                "title": "ملک ثابت (ویرایش‌شده)",
+                "latitude": "36.563421",
+                "longitude": "53.060112",
+            },
+            format="json",
+        )
+        self.assertEqual(retitled.status_code, 200, retitled.content[:400])
+
+    def test_update_without_coordinates_is_not_blocked(self):
+        created = self._create(title="ملک بدون موقعیت")
+        prop_id = created.json()["id"]
+
+        retitled = self.client.patch(
+            f"/properties/api/properties/{prop_id}/",
+            {"title": "بدون مختصات"},
+            format="json",
+        )
+        self.assertEqual(retitled.status_code, 200, retitled.content[:400])

@@ -333,6 +333,30 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
             if legacy:
                 attrs["property_type"] = legacy
 
+        # A property location must be unique across the system: two properties
+        # with exactly the same coordinates would overlap on every map (the
+        # create/edit map, the consultant detail map and the dashboard maps).
+        # The check applies to creates and to updates that change the location;
+        # re-saving a property with its own unchanged coordinates is allowed.
+        lat = attrs.get("latitude")
+        lng = attrs.get("longitude")
+        if lat is not None and lng is not None:
+            duplicates = Property.objects.filter(latitude=lat, longitude=lng)
+            if self.instance is not None:
+                duplicates = duplicates.exclude(pk=self.instance.pk)
+            duplicate = duplicates.first()
+            if duplicate is not None:
+                raise serializers.ValidationError(
+                    {
+                        "latitude": (
+                            f"این موقعیت قبلاً برای ملک «{duplicate.title}» "
+                            f"(کد {duplicate.internal_code}) ثبت شده است. "
+                            "موقعیت ملک نمی‌تواند با ملک دیگری یکی باشد؛ "
+                            "نقطهٔ دیگری روی نقشه انتخاب کنید یا مختصات دیگری وارد کنید."
+                        )
+                    }
+                )
+
         return attrs
 
     def to_internal_value(self, data):
