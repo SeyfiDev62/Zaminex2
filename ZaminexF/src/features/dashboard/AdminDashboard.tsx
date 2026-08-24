@@ -25,6 +25,8 @@ import { Building2, FileText, CheckSquare, BellRing, Users, Activity, Settings, 
 import { PIE_COLORS, CHART_COLORS } from "../../shared/lib/constants";
 import { formatJalali, formatJalaliDT, formatJalaliDateTime } from "../../shared/lib/jdate";
 import { TaskDetailModal } from "../../shared/components/TaskDetailModal";
+import { PropertyDistributionMap, type DistributionPoint } from "../../shared/components/ui/PropertyDistributionMap";
+import { consultantMarkerColor, CONSULTANT_FALLBACK_COLOR } from "../../shared/lib/consultantColors";
 function AdminDashboard({
   kpis,
   navigate,
@@ -105,6 +107,55 @@ function AdminDashboard({
   const revenueData = useMemo(() => revenueMonthly || [], [revenueMonthly]);
   const dealTypes = useMemo(() => revenueDealTypes || [], [revenueDealTypes]);
   const hasRevenue = revenueData.some((m) => (m.revenue || 0) > 0 || (m.count || 0) > 0);
+
+  // Located properties for the «نقشه توزیع املاک» section: every property
+  // with stored coordinates, marker colour driven by the assigned consultant
+  // (the stable non-repeating palette — a new consultant gets a fresh colour).
+  const locatedProperties = useMemo<DistributionPoint[]>(
+    () =>
+      (properties || [])
+        .filter((p) => p.latitude != null && p.longitude != null)
+        .map((p) => ({
+          id: p.id,
+          title: p.title,
+          lat: Number(p.latitude),
+          lng: Number(p.longitude),
+          status: String((p as any).propertyStatus || "").toUpperCase(),
+          area: Number(p.area || 0),
+          consultantId: ((p as any).consultantId ?? null) as string | number | null,
+          consultantName: ((p as any).consultantName as string) || "نامشخص",
+        })),
+    [properties]
+  );
+
+  // Legend rows: one per consultant present on the map, in the same stable
+  // order the markers use, so legend colour and pin colour always match.
+  const consultantColorLegend = useMemo(() => {
+    const ids = locatedProperties.map((p) => p.consultantId);
+    const byId = new Map<string, { name: string; count: number }>();
+    locatedProperties.forEach((p) => {
+      const key = p.consultantId == null ? "__none__" : String(p.consultantId);
+      const entry = byId.get(key) || { name: p.consultantName || "نامشخص", count: 0 };
+      entry.count += 1;
+      byId.set(key, entry);
+    });
+    const rows = Array.from(byId.entries()).map(([id, entry]) => ({
+      id,
+      name: entry.name,
+      count: entry.count,
+      color:
+        id === "__none__"
+          ? CONSULTANT_FALLBACK_COLOR
+          : consultantMarkerColor(Number(id), ids),
+    }));
+    rows.sort((a, b) => {
+      const na = Number(a.id);
+      const nb = Number(b.id);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return a.name.localeCompare(b.name);
+    });
+    return rows;
+  }, [locatedProperties]);
 
   // `upcomingFollowups` already arrives sorted (overdue first, then newest
   // activity, with a stable id tie-breaker) and trimmed to five. Re-sorting it
@@ -270,6 +321,28 @@ function AdminDashboard({
               </button>
             ))}
           </div>
+        )}
+      </Card>
+      <Card className="p-5">
+        <div className="mb-4">
+          <h2 className="text-sm font-semibold">نقشه توزیع املاک</h2>
+          <p className="text-xs text-muted-foreground mt-0.5">موقعیت جغرافیایی املاک واگذارشده به مشاورها روی نقشه؛ رنگ نشانگر بر اساس مشاور است.</p>
+        </div>
+        {locatedProperties.length === 0 ? (
+          <p className="py-10 text-center text-xs text-muted-foreground">هنوز موقعیت جغرافیایی ملکی ثبت نشده است.</p>
+        ) : (
+          <>
+            <PropertyDistributionMap points={locatedProperties} colorMode="consultant" badgeLabel="نقشهٔ توزیع املاک" />
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+              {consultantColorLegend.map((row) => (
+                <span key={row.id} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: row.color }} />
+                  {row.name}
+                  <span className="font-semibold text-foreground/70">{row.count.toLocaleString("fa-IR")}</span>
+                </span>
+              ))}
+            </div>
+          </>
         )}
       </Card>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

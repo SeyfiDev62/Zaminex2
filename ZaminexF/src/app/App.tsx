@@ -1795,12 +1795,13 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
             followups={followups}
             userName={userName}
             consultantId={currentConsultantId}
-            recentActivities={recentActivities}
-            onSaveTask={saveTask}
-            onDeleteTask={deleteTask}
-            myReport={myReport}
-            propertyComposition={propertyComposition}
-            kpis={{
+              recentActivities={recentActivities}
+              onSaveTask={saveTask}
+              onDeleteTask={deleteTask}
+              myReport={myReport}
+              propertyComposition={propertyComposition}
+              properties={properties}
+              kpis={{
               properties: properties.filter(p => String(p.consultantId ?? p.consultant ?? "") === String(currentConsultantId)).length,
               listings: listings.filter(l => l.status === "ACTIVE" && (String(l.assigned_to) === String(currentConsultantId) || String((l as any).created_by) === String(currentConsultantId))).length,
               openTasks: tasks.filter(t => String(t.assigneeId) === String(currentConsultantId) && t.status !== "COMPLETED" && t.status !== "CANCELLED").length,
