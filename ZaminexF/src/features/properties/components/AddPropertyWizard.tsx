@@ -19,7 +19,7 @@ import { PropertyCombobox } from "../../../shared/components/ui/PropertyCombobox
 import { ConsultantCombobox } from "../../../shared/components/ui/ConsultantCombobox";
 import { DistrictCombobox } from "../../../shared/components/ui/DistrictCombobox";
 import { apiFetch, readJson, apiErrorMessage, getCsrfToken } from "../../../shared/lib/apiClient";
-import { toast, requiredFieldMsg } from "../../../shared/lib/utils";
+import { toast, requiredFieldMsg, validateCoordinatePair } from "../../../shared/lib/utils";
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, ReferenceLine, Legend, RadarChart, Radar, PolarGrid, PolarAngleAxis } from "recharts";
 import { Building2, FileText, CheckSquare, BellRing, Users, Activity, Settings, Plus, RefreshCw, Eye, Edit2, Trash2, Archive, Clock, MapPin, Check, X, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, SlidersHorizontal, ArrowUpRight, LayoutGrid, List, Download, Search, MoreVertical, Phone, Mail, Calendar, TrendingUp, Star, Shield, Lock, Key, Send, Loader2, AlertTriangle, Info, XCircle, CheckCircle2, TriangleAlert, Columns, MessageSquare, Sparkles, GripVertical, Building, History, Flame, Image, Zap, LayoutDashboard, Command, Filter, Award, BarChart3, Layers, User, UserRound, Upload } from "lucide-react";
 import { TRANSACTION_TYPES } from "../../../shared/lib/constants";
@@ -222,6 +222,25 @@ function AddPropertyWizard({
     return true;
   };
 
+  // «تایید» button next to the latitude/longitude fields: validates the
+  // typed coordinates (Persian digits ok, Iran bounds checked) and registers
+  // them — the map then flies to that point and the fixed marker lands on it,
+  // because the picker follows the confirmed `value` prop.
+  const [coordError, setCoordError] = useState<string | null>(null);
+  const handleConfirmCoordinates = () => {
+    const result = validateCoordinatePair(form.latitude, form.longitude);
+    if (result.state === "empty") {
+      setCoordError("برای تایید، هر دو مختصات را وارد کنید یا موقعیت را از روی نقشه انتخاب کنید.");
+      return;
+    }
+    if (result.state === "invalid") {
+      setCoordError(result.error);
+      return;
+    }
+    setCoordError(null);
+    setForm((p) => ({ ...p, latitude: String(result.value[0]), longitude: String(result.value[1]) }));
+  };
+
   const mapFormToPayload = () => ({
     title: form.title,
     internalCode: form.internalCode,
@@ -379,12 +398,30 @@ function AddPropertyWizard({
               required
             />
             <Input label="آدرس کامل" placeholder="مثال: مازندران، ساری، بلوار پاسداران، خیابان گلستان، پلاک ۱۴" value={form.fullAddress} onChange={(v) => set("fullAddress", v)} error={fieldErrors.fullAddress} required />
+            <div className="pt-2 border-t border-border">
+              <h3 className="text-sm font-semibold mb-1 flex items-center gap-1.5">
+                <MapPin size={14} />
+                موقعیت جغرافیایی
+              </h3>
+              <p className="text-[11px] text-muted-foreground mb-3">برای ثبت موقعیت ملک، طول و عرض جغرافیایی را وارد کنید یا از روی نقشه انتخاب کنید.</p>
+              <div className="flex items-end gap-2">
+                <div className="flex-1">
+                  <Input label="عرض جغرافیایی" placeholder="مثال: 36.563421" value={form.latitude} onChange={(v) => { set("latitude", v); setCoordError(null); }} />
+                </div>
+                <div className="flex-1">
+                  <Input label="طول جغرافیایی" placeholder="مثال: 53.060112" value={form.longitude} onChange={(v) => { set("longitude", v); setCoordError(null); }} />
+                </div>
+                <Btn variant="secondary" onClick={handleConfirmCoordinates}><Check size={14} />تایید</Btn>
+              </div>
+              {coordError && <p className="text-xs text-destructive mt-2">{coordError}</p>}
+            </div>
             <PropertyMapPicker
               value={form.latitude && form.longitude ? [Number(form.latitude), Number(form.longitude)] : null}
-              onChange={(p) => setForm((s) => ({ ...s, latitude: String(p[0]), longitude: String(p[1]) }))}
+              onChange={(p) => { setForm((s) => ({ ...s, latitude: String(p[0]), longitude: String(p[1]) })); setCoordError(null); }}
               provinceName={selectedLocationNames.provinceName}
               cityName={selectedLocationNames.cityName}
               districtName={selectedLocationNames.districtName}
+              csrfToken={csrfToken}
             />
           </div>
         )}
