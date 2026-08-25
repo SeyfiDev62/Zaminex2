@@ -318,6 +318,44 @@ class PropertyOwnerFieldsApiTests(TestCase):
         self.assertEqual(data["ownerFirstName"], "سارا")
         self.assertEqual(data["ownerPhone"], "09129998877")
 
+    def test_owner_phone_must_be_11_digits_starting_09(self):
+        for bad in ("0912123456", "19121234567", "091212345678", "09121234a67", ""):
+            resp = self.client.post(
+                "/properties/api/properties/",
+                {
+                    "title": "ملک موبایل نامعتبر",
+                    "type": "APARTMENT",
+                    "transactionType": "SALE",
+                    "area": 80,
+                    "fullAddress": "تهران",
+                    "ownerFirstName": "علی",
+                    "ownerLastName": "رضایی",
+                    "ownerPhone": bad,
+                },
+                format="json",
+            )
+            # Empty is rejected as missing; wrong formats as invalid.
+            self.assertEqual(resp.status_code, 400, f"{bad!r}: {resp.content[:300]}")
+            self.assertIn("owner_phone", resp.json())
+        self.assertEqual(Property.objects.filter(title="ملک موبایل نامعتبر").count(), 0)
+
+    def test_partial_update_without_phone_is_not_blocked(self):
+        prop = Property.objects.create(
+            title="ملک بدون موبایل",
+            internal_code="ZF_9302",
+            consultant=self.admin,
+            property_type="APARTMENT",
+            deal_type="SALE",
+            area=80,
+            address="تهران",
+        )
+        resp = self.client.patch(
+            f"/properties/api/properties/{prop.id}/",
+            {"title": "فقط تغییر عنوان"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content[:400])
+
 
 class PropertyScopeAllAccessTests(TestCase):
     """The consultant "همه املاک" tab reads every property but cannot mutate

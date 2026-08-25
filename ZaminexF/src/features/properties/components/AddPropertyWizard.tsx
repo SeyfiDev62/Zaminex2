@@ -19,7 +19,7 @@ import { PropertyCombobox } from "../../../shared/components/ui/PropertyCombobox
 import { ConsultantCombobox } from "../../../shared/components/ui/ConsultantCombobox";
 import { DistrictCombobox } from "../../../shared/components/ui/DistrictCombobox";
 import { apiFetch, readJson, apiErrorMessage, getCsrfToken } from "../../../shared/lib/apiClient";
-import { toast, requiredFieldMsg, validateCoordinatePair } from "../../../shared/lib/utils";
+import { toast, requiredFieldMsg, validateCoordinatePair, ownerPhoneError, normalizePhone } from "../../../shared/lib/utils";
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, ReferenceLine, Legend, RadarChart, Radar, PolarGrid, PolarAngleAxis } from "recharts";
 import { Building2, FileText, CheckSquare, BellRing, Users, Activity, Settings, Plus, RefreshCw, Eye, Edit2, Trash2, Archive, Clock, MapPin, Check, X, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, SlidersHorizontal, ArrowUpRight, LayoutGrid, List, Download, Search, MoreVertical, Phone, Mail, Calendar, TrendingUp, Star, Shield, Lock, Key, Send, Loader2, AlertTriangle, Info, XCircle, CheckCircle2, TriangleAlert, Columns, MessageSquare, Sparkles, GripVertical, Building, History, Flame, Image, Zap, LayoutDashboard, Command, Filter, Award, BarChart3, Layers, User, UserRound, Upload } from "lucide-react";
 import { TRANSACTION_TYPES } from "../../../shared/lib/constants";
@@ -188,6 +188,12 @@ function AddPropertyWizard({
     requiredForStep(s).forEach((k) => {
       if (!String((form as Record<string, any>)[k] ?? "").trim()) errs[k] = requiredFieldMsg(REQUIRED_LABELS[k]);
     });
+    // Owner mobile format (11 digits starting with 09) — checked on the
+    // step-1 fields even when empty is only allowed on edit.
+    if (s === 1) {
+      const phoneErr = ownerPhoneError(form.ownerPhone);
+      if (phoneErr) errs["ownerPhone"] = phoneErr;
+    }
     setFieldErrors((prev) => {
       const next = { ...prev };
       requiredForStep(s).forEach((k) => { delete next[k]; });
@@ -257,7 +263,7 @@ function AddPropertyWizard({
     consultant: form.consultant || null,
     ownerFirstName: form.ownerFirstName,
     ownerLastName: form.ownerLastName,
-    ownerPhone: form.ownerPhone,
+    ownerPhone: normalizePhone(form.ownerPhone),
     attributes,
   });
 

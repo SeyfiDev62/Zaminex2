@@ -295,3 +295,28 @@ export function validateCoordinatePair(
   }
   return { state: "valid", value: [Number(lat.toFixed(6)), Number(lng.toFixed(6))] };
 }
+
+// ---------------------------------------------------------------------------
+//  Owner mobile validation (property create/edit forms)
+// ---------------------------------------------------------------------------
+
+/** Persian digits → Latin, drop spaces/dashes — a clean 11-digit string. */
+export function normalizePhone(raw: string | number | null | undefined): string {
+  return String(raw ?? "")
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[\s-]/g, "");
+}
+
+/**
+ * Persian error for an invalid owner mobile, or null when the value is fine.
+ * Empty input returns null — the required-field check owns that case.
+ * Rule: exactly 11 digits starting with 09 (09XXXXXXXXX).
+ */
+export function ownerPhoneError(raw: string | number | null | undefined): string | null {
+  const cleaned = normalizePhone(raw);
+  if (!cleaned) return null;
+  if (!/^09\d{9}$/.test(cleaned)) {
+    return "شماره موبایل مالک باید دقیقاً ۱۱ رقم و با ۰۹ شروع شود (مثال: 09121234567).";
+  }
+  return null;
+}

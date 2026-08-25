@@ -19,7 +19,7 @@ import { PropertyCombobox } from "../../../shared/components/ui/PropertyCombobox
 import { ConsultantCombobox } from "../../../shared/components/ui/ConsultantCombobox";
 import { DistrictCombobox } from "../../../shared/components/ui/DistrictCombobox";
 import { apiFetch, readJson, apiErrorMessage, getCsrfToken } from "../../../shared/lib/apiClient";
-import { toast, requiredFieldMsg, validateCoordinatePair } from "../../../shared/lib/utils";
+import { toast, requiredFieldMsg, validateCoordinatePair, ownerPhoneError, normalizePhone } from "../../../shared/lib/utils";
 import { DynamicAttributeFields } from "../../../shared/components/ui/DynamicAttributeFields";
 import { LocationSelect, useLocationTree, findLocationPath } from "../../../shared/components/ui/LocationSelect";
 import { PropertyMapPicker } from "../../../shared/components/ui/PropertyMapPicker";
@@ -181,6 +181,12 @@ function EditPropertyWizard({
     requiredForStep(s).forEach((k) => {
       if (!String((form as Record<string, any>)[k] ?? "").trim()) errs[k] = requiredFieldMsg(REQUIRED_LABELS[k]);
     });
+    // Owner mobile format (11 digits starting with 09) — checked on the
+    // step-1 fields even when empty is only allowed on edit.
+    if (s === 1) {
+      const phoneErr = ownerPhoneError(form.ownerPhone);
+      if (phoneErr) errs["ownerPhone"] = phoneErr;
+    }
     setFieldErrors((prev) => {
       const next = { ...prev };
       requiredForStep(s).forEach((k) => { delete next[k]; });
@@ -274,7 +280,7 @@ function EditPropertyWizard({
     consultant: form.consultant || undefined,
     ownerFirstName: form.ownerFirstName,
     ownerLastName: form.ownerLastName,
-    ownerPhone: form.ownerPhone,
+    ownerPhone: normalizePhone(form.ownerPhone),
     attributes: Object.fromEntries(Object.entries(attributes).filter(([k]) => schemaNames.has(k))),
   });
 

@@ -1,3 +1,5 @@
+import re
+
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import serializers
@@ -304,6 +306,20 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
                     missing[field] = f"{label} الزامی است."
             if missing:
                 raise serializers.ValidationError(missing)
+
+        # Owner mobile format (mirrors the form rule): exactly 11 digits
+        # starting with 09. Only enforced when a value is actually provided,
+        # so partial updates of other fields are never blocked.
+        phone = str(attrs.get("owner_phone") or "").strip()
+        if phone and not re.fullmatch(r"09\d{9}", phone):
+            raise serializers.ValidationError(
+                {
+                    "owner_phone": (
+                        "شماره موبایل مالک باید دقیقاً ۱۱ رقم و با ۰۹ شروع "
+                        "شود (مثال: 09121234567)."
+                    )
+                }
+            )
 
         # Consultants cannot change the consultant field on shared properties.
         request = self.context.get("request")
