@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import datetime
 import io
 from urllib.parse import quote
 
@@ -188,10 +189,23 @@ class TicketViewSet(viewsets.ModelViewSet):
                 participants__user_id=user.pk, participants__is_read=True
             )
 
-        if self.request.query_params.get("overdue") in {"true", "1", "yes"}:
-            queryset = queryset.filter(sla_due_at__lt=timezone.now()).exclude(
+        # SLA filter buckets (Persian-labelled in the UI): overdue, due
+        # within the next 12 hours, or comfortably inside the deadline.
+        overdue_state = (self.request.query_params.get("overdue") or "").lower()
+        now = timezone.now()
+        soon_horizon = now + datetime.timedelta(hours=12)
+        if overdue_state in {"true", "1", "yes", "overdue"}:
+            queryset = queryset.filter(sla_due_at__lt=now).exclude(
                 status=TicketStatus.CLOSED
             )
+        elif overdue_state in {"upcoming", "due_soon", "soon"}:
+            queryset = queryset.filter(
+                sla_due_at__gte=now, sla_due_at__lt=soon_horizon
+            ).exclude(status=TicketStatus.CLOSED)
+        elif overdue_state in {"open", "not_due", "inside"}:
+            queryset = queryset.filter(
+                sla_due_at__gte=soon_horizon
+            ).exclude(status=TicketStatus.CLOSED)
 
         sender_id = self.request.query_params.get(
             "senderId"
@@ -207,20 +221,27 @@ class TicketViewSet(viewsets.ModelViewSet):
                 participants__role=TicketParticipantRole.RECIPIENT,
             )
 
-        # Admin monitoring can filter one user in either direction. The
-        # consultant UI never exposes this control; the base scope still makes
-        # a hand-crafted request harmless.
+        # Admin monitoring can filter one or more users in either direction
+        # (the filter control is a multi-select; the value is a comma
+        # separated id list). The consultant UI never exposes this control;
+        # the base scope still makes a hand-crafted request harmless.
         user_id = self.request.query_params.get(
             "userId"
         ) or self.request.query_params.get("consultantId")
         if user_id and getattr(user, "role", "") == "ADMIN":
-            queryset = queryset.filter(
-                Q(created_by_id=user_id)
-                | Q(
-                    participants__user_id=user_id,
-                    participants__role=TicketParticipantRole.RECIPIENT,
-                )
-            )
+            user_ids = [
+                int(part)
+                for part in str(user_id).split(",")
+                if part.strip().isdigit()
+            ]
+            if user_ids:
+                user_query = Q()
+                for uid in user_ids:
+                    user_query |= Q(created_by_id=uid) | Q(
+                        participants__user_id=uid,
+                        participants__role=TicketParticipantRole.RECIPIENT,
+                    )
+                queryset = queryset.filter(user_query)
 
         subject_id = self.request.query_params.get(
             "subjectId"
