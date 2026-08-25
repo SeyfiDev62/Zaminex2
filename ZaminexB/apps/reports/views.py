@@ -121,6 +121,80 @@ class PropertyReportExportView(APIView):
         return resp
 
 
+class PropertyReportPdfView(APIView):
+    """PDF export of the full property report.
+
+    Same scoped data as the JSON/CSV exports, rendered to a printed report
+    (property info → KPIs → listings → follow-ups → charts → activity log).
+
+    Access is deliberately one step stricter than the on-screen report:
+    admins may export any property, while consultants may only export the
+    properties they are assigned to or that are shared with them.
+    Every export is written to the activity log, exactly like the CSV one.
+    """
+
+    permission_classes = [IsAuthenticatedRole]
+
+    def get(self, request, property_id):
+        try:
+            pid = int(property_id)
+        except (TypeError, ValueError):
+            return Response({"detail": "شناسه ملک نامعتبر است."}, status=400)
+
+        from apps.common.access import can_access_property
+        from apps.properties.models import Property as PropertyModel
+
+        prop = (
+            PropertyModel.objects.select_related(
+                "consultant",
+                "property_type_ref",
+                "property_usage",
+                "district",
+                "district__city",
+                "district__city__province",
+            )
+            .prefetch_related("listings__deal_type", "tasks", "followups", "images")
+            .filter(pk=pid)
+            .first()
+        )
+        if prop is None:
+            return Response({"detail": "ملک مورد نظر وجود ندارد."}, status=404)
+        if not can_access_property(request.user, prop):
+            return Response({"detail": "شما به گزارش این ملک دسترسی ندارید."}, status=403)
+
+        filters = {
+            "date_from": _parse_date(request.query_params.get("date_from")),
+            "date_to": _parse_date(request.query_params.get("date_to")),
+        }
+        filters = {k: v for k, v in filters.items() if v is not None}
+        report = compute_property_report(prop, filters=filters)
+
+        # Record the export in the activity log, mirroring the CSV export.
+        from apps.common.activity import log_activity
+        from apps.common.models import ActivityLog
+
+        log_activity(
+            user=request.user,
+            action=ActivityLog.ActionType.EXPORT,
+            target_type=ActivityLog.TargetType.PROPERTY,
+            target_id=pid,
+            description=f"گزارش کامل ملک «{prop.title}» به‌صورت PDF دریافت شد",
+            metadata={
+                "format": "pdf",
+                "property_id": pid,
+                "date_from": request.query_params.get("date_from"),
+                "date_to": request.query_params.get("date_to"),
+            },
+        )
+
+        from .pdf import build_property_pdf
+
+        pdf_bytes = build_property_pdf(prop, report, request.user)
+        resp = HttpResponse(pdf_bytes, content_type="application/pdf")
+        resp["Content-Disposition"] = f'attachment; filename="property-report-{pid}.pdf"'
+        return resp
+
+
 class ConsultantScopeReportView(APIView):
     """Aggregate KPIs within the caller's scope.
 

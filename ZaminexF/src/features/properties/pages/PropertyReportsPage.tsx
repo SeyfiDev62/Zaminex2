@@ -33,6 +33,7 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
   const [exporting, setExporting] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
 
   const load = useCallback(async () => {
     if (!propertyId) return;
@@ -89,6 +90,41 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
     }
   };
 
+  // PDF export: the server renders the full printed report (property info →
+  // KPIs → listings → follow-ups → charts → activity log). Consultants may
+  // only download it for their own or shared properties; the 403/404 Persian
+  // message from the API is surfaced as-is.
+  const handleExportPdf = async () => {
+    if (!propertyId) return;
+    setExportingPdf(true);
+    try {
+      const qs = new URLSearchParams();
+      if (dateFrom) qs.set("date_from", dateFrom);
+      if (dateTo) qs.set("date_to", dateTo);
+      const url = `/api/reports/properties/${propertyId}/export-pdf/${qs.toString() ? "?" + qs.toString() : ""}`;
+      const res = await fetch(url, { method: "GET", credentials: "same-origin" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        const message = err && typeof err === "object" && err.detail ? String(err.detail) : "خطا در تهیه خروجی PDF";
+        toast({ type: "error", message });
+        return;
+      }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `property-report-${propertyId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+      toast({ type: "success", message: "خروجی PDF دریافت شد." });
+    } catch {
+      toast({ type: "error", message: "خطا در تهیه خروجی PDF" });
+    } finally {
+      setExportingPdf(false);
+    }
+  };
+
   if (!propertyId) {
     return (
       <div className="p-6 max-w-4xl mx-auto">
@@ -108,6 +144,7 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
         actions={
           <div className="flex gap-2">
             <Btn variant="ghost" size="sm" onClick={onBack}><ChevronRight size={13} />بازگشت به ملک</Btn>
+            <Btn variant="secondary" size="sm" onClick={handleExportPdf} disabled={exportingPdf || !data}><Download size={13} />{exportingPdf ? "در حال تهیه…" : "خروجی PDF"}</Btn>
             <Btn variant="secondary" size="sm" onClick={handleExport} disabled={exporting || !data}><Download size={13} />{exporting ? "در حال تهیه…" : "خروجی CSV"}</Btn>
           </div>
         }

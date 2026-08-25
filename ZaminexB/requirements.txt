@@ -28,6 +28,13 @@ pillow==12.3.0
 # Jalali (Shamsi) date conversion for the Persian monthly revenue chart.
 jdatetime==6.1.0
 
+# --- PDF report ------------------------------------------------------------
+# Server-side «گزارش کامل» PDF: reportlab renders the document, arabic-reshaper
+# joins the Persian letters and python-bidi flips the text to visual order.
+reportlab==5.0.1
+arabic-reshaper==3.0.1
+python-bidi==0.6.11
+
 # --- Search ----------------------------------------------------------------
 # Uses PostgreSQL pg_trgm (TrigramSimilarity) and Django postgres search
 # for native, field-by-field fuzzy matching with Persian normalization.
