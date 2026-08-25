@@ -940,8 +940,9 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     setPropertiesLoading(true);
     setPropertiesError(null);
     try {
-      // Use large page_size to get all for dashboard/KPIs; pagination-enabled endpoint returns count
-      const res = await apiFetch("/properties/api/properties/?page_size=1000", { method: "GET" }, initialData.csrfToken);
+      // Use large page_size to get all for dashboard/KPIs; pagination-enabled endpoint returns count.
+      // no-store: a cached copy would resurface rows that were just deleted.
+      const res = await apiFetch("/properties/api/properties/?page_size=1000", { method: "GET", cache: "no-store" }, initialData.csrfToken);
       if (!res.ok) throw new Error("خطا در دریافت لیست املاک");
       const data = await res.json();
       const items = Array.isArray(data) ? data : (data.results ?? []);
@@ -967,7 +968,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     try {
       const res = await apiFetch(
         "/properties/api/properties/?scope=all&page_size=1000",
-        { method: "GET" },
+        { method: "GET", cache: "no-store" },
         initialData.csrfToken
       );
       if (!res.ok) return;
@@ -1197,6 +1198,11 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
       const res = await apiFetch(`/properties/api/properties/${id}/`, { method: "DELETE" }, initialData.csrfToken);
       if (!res.ok) throw new Error("خطا در حذف ملک");
       toast({ type: "success", message: "ملک حذف شد." });
+      // Drop the row from every in-memory list immediately so the UI updates
+      // in the same tick — the refetch below only re-syncs (and may be served
+      // from a stale cache, so it must not be what the user waits for).
+      setProperties((prev) => prev.filter((p) => String(p.id) !== String(id)));
+      setAllProperties((prev) => prev.filter((p) => String(p.id) !== String(id)));
       await fetchProperties();
       setPage("properties");
     } catch (err: any) {
