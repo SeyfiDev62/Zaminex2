@@ -155,6 +155,25 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
     return consultantRef ? "مشاور" : "";
   })();
   const isSharedProperty = Boolean((property as any)?.isShared);
+  // Access level of the current viewer:
+  //  - admin: full access to every property
+  //  - consultant: full access to their own properties; full access to shared
+  //    ones, EXCEPT delete/archive (the server enforces the same via
+  //    can_manage_property); everything else (someone else's non-shared
+  //    property) is a read-only view — no address/owner info, no create
+  //    buttons, view-only gallery/listings/tasks/follow-ups.
+  const isOwnerProperty =
+    role === "consultant" &&
+    currentUserId != null &&
+    String(property?.consultantId ?? property?.consultant ?? "") === String(currentUserId);
+  const canModifyProperty = role === "admin" || isOwnerProperty || isSharedProperty;
+  const canManageProperty = role === "admin" || isOwnerProperty;
+  const canViewPrivateInfo = canModifyProperty;
+  // A non-managing viewer can never archive (the server rejects it), so the
+  // status control hides that option for them.
+  const statusOptions = canManageProperty
+    ? PROPERTY_STATUSES
+    : PROPERTY_STATUSES.filter((st) => st !== "Inactive");
   // Upload/delete rights for the appraisal-report tab mirror the gallery:
   // the assigned consultant (کارشناس ثبت‌کننده / واگذارشده) or an admin.
   // The server re-checks with can_manage_property; this only shapes the UI.
@@ -218,16 +237,16 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
             </div>
           </div>
           <div className="flex gap-2 flex-shrink-0">
-            <Btn variant="secondary" size="sm" onClick={() => { if (openPropertyEdit) openPropertyEdit(String(property.id)); else navigate("edit-property"); }}>
+            <Btn variant="secondary" size="sm" disabled={!canModifyProperty} onClick={() => { if (openPropertyEdit) openPropertyEdit(String(property.id)); else navigate("edit-property"); }}>
               <Edit2 size={13} />ویرایش
             </Btn>
-            <Btn variant="secondary" size="sm" onClick={() => setConfirmArchive(true)}>
+            <Btn variant="secondary" size="sm" disabled={!canManageProperty} onClick={() => setConfirmArchive(true)}>
               <Archive size={13} />بایگانی
             </Btn>
-            <Btn variant="danger" size="sm" onClick={() => setConfirmDelete(true)}>
+            <Btn variant="danger" size="sm" disabled={!canManageProperty} onClick={() => setConfirmDelete(true)}>
               <Trash2 size={13} />حذف
             </Btn>
-            <Btn variant="primary" size="sm" onClick={() => navigate("create-listing", property.id)}>
+            <Btn variant="primary" size="sm" disabled={!canModifyProperty} onClick={() => navigate("create-listing", property.id)}>
               <Plus size={13} />ساخت آگهی
             </Btn>
             {role === "admin" && onToggleShared && (
@@ -245,7 +264,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                 disabled={sharedSaving}
               >
                 {(property as any).isShared ? <User size={13} /> : <Users size={13} />}
-                {sharedSaving ? "در حال ذخیره..." : ((property as any).isShared ? `قابل مشاهده فقط برای ${property.consultantName || "مشاور مربوطه"}` : "نمایش برای همه مشاوران")}
+                {sharedSaving ? "در حال ذخیره..." : ((property as any).isShared ? "فقط مشاور مسئول" : "اشتراک‌گذاری با همه")}
               </Btn>
             )}
           </div>
@@ -276,16 +295,22 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                   <h3 className="text-sm font-semibold">جزئیات ملک</h3>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-muted-foreground">وضعیت:</span>
-                    <select 
-                      value={propStatus} 
-                      onChange={(e) => setPropStatus(e.target.value)} 
-                      className="text-xs rounded-lg border border-border bg-input-background px-2.5 py-1.5 outline-none focus:ring-2 focus:ring-ring"
-                    >
-                      {PROPERTY_STATUSES.map((s) => <option key={s} value={s}>{toPersianPropertyStatus(s)}</option>)}
-                    </select>
-                    <Btn variant="primary" size="xs" onClick={handleSaveStatus} disabled={statusSaving}>
-                      <Check size={11} />{statusSaving ? "در حال ذخیره..." : "ذخیره"}
-                    </Btn>
+                    {canModifyProperty ? (
+                      <>
+                        <select 
+                          value={propStatus} 
+                          onChange={(e) => setPropStatus(e.target.value)} 
+                          className="text-xs rounded-lg border border-border bg-input-background px-2.5 py-1.5 outline-none focus:ring-2 focus:ring-ring"
+                        >
+                          {statusOptions.map((st) => <option key={st} value={st}>{toPersianPropertyStatus(st)}</option>)}
+                        </select>
+                        <Btn variant="primary" size="xs" onClick={handleSaveStatus} disabled={statusSaving}>
+                          <Check size={11} />{statusSaving ? "در حال ذخیره..." : "ذخیره"}
+                        </Btn>
+                      </>
+                    ) : (
+                      <span className="text-xs font-medium">{toPersianPropertyStatus(propStatus)}</span>
+                    )}
                   </div>
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
@@ -303,8 +328,6 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                     ["شهر", (property as any).cityName || (property as any).city?.displayName || (property as any).city?.display_name || (property as any).locationPath?.split(" / ")?.[1] || null],
                     ["محله", (property as any).district || property.neighborhood || (typeof (property as any).district === 'object' ? ((property as any).district?.displayName || (property as any).district?.display_name || (property as any).district?.name) : null) || (property as any).locationPath?.split(" / ")?.slice(-1)?.[0] || null],
                     ["مسیر کامل موقعیت", (property as any).locationPath || ((property as any).provinceName && (property as any).cityName && (property as any).district ? `${(property as any).provinceName} / ${(property as any).cityName} / ${(property as any).district}` : null)],
-                    ["نام مالک", [[property.ownerFirstName, property.ownerLastName].filter(Boolean).join(" "), (property as any).owner_first_name, (property as any).owner_last_name].filter(Boolean).join(" ") || null],
-                    ["شماره موبایل مالک", property.ownerPhone || (property as any).owner_phone || null],
                   ].filter(([, v]) => v !== null && v !== undefined && v !== '')).map(([k, v]) => (
                     <div key={k} className="p-3 bg-secondary rounded-xl">
                       <p className="text-xs text-muted-foreground mb-1">{k}</p>
@@ -359,7 +382,33 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                   </div>
                 </Card>
               )}
-              {(property.fullAddress || property.address || (property as any).locationPath || (property.latitude != null && property.longitude != null)) && (
+              {(() => {
+                const ownerName = [[property.ownerFirstName, property.ownerLastName].filter(Boolean).join(" "), (property as any).owner_first_name, (property as any).owner_last_name].filter(Boolean).join(" ");
+                const ownerPhone = property.ownerPhone || (property as any).owner_phone;
+                if (!ownerName && !ownerPhone) return null;
+                if (!canViewPrivateInfo) return null;
+                return (
+                  <Card className="p-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-8 h-8 rounded-lg bg-primary/10 text-primary flex items-center justify-center">
+                        <User size={14} />
+                      </div>
+                      <h3 className="text-sm font-semibold">اطلاعات مالک</h3>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="p-3 bg-secondary rounded-xl">
+                        <p className="text-xs text-muted-foreground mb-1">نام مالک</p>
+                        <p className="text-sm font-semibold">{ownerName || "—"}</p>
+                      </div>
+                      <div className="p-3 bg-secondary rounded-xl">
+                        <p className="text-xs text-muted-foreground mb-1">شماره موبایل</p>
+                        <p className="text-sm font-semibold text-right" dir="ltr">{ownerPhone || "—"}</p>
+                      </div>
+                    </div>
+                  </Card>
+                );
+              })()}
+              {canViewPrivateInfo && (property.fullAddress || property.address || (property as any).locationPath || (property.latitude != null && property.longitude != null)) && (
               <Card className="p-5">
                 <h3 className="text-sm font-semibold mb-2">آدرس کامل</h3>
                 {(property.fullAddress || property.address || (property as any).locationPath) && (
@@ -456,6 +505,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
             onDeleteImage={onDeleteImage}
             onUploadImages={onUploadImages}
             onReorderImages={onReorderImages}
+            readOnly={!canModifyProperty}
           />
         )}
 
@@ -514,7 +564,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
           <div className="max-w-5xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">آگهی‌های این ملک</h3>
-              <Btn variant="primary" size="sm" onClick={() => navigate("create-listing", property.id)}>
+              <Btn variant="primary" size="sm" disabled={!canModifyProperty} onClick={() => navigate("create-listing", property.id)}>
                 <Plus size={13} />ساخت آگهی جدید
               </Btn>
             </div>
@@ -527,14 +577,14 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                 icon={<FileText size={28} />}
                 title="آگهی‌ای وجود ندارد"
                 description="هنوز آگهی برای این ملک ثبت نشده است."
-                action={<Btn variant="primary" size="sm" onClick={() => navigate("create-listing", property.id)}><Plus size={13} />ایجاد اولین آگهی</Btn>}
+                action={<Btn variant="primary" size="sm" disabled={!canModifyProperty} onClick={() => navigate("create-listing", property.id)}><Plus size={13} />ایجاد اولین آگهی</Btn>}
               />
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {propertyListings.map((l) => {
                   const consultantName = l.assigned_to_detail?.name || property.consultantName || "نامشخص";
                   return (
-                    <Card key={l.id} hover onClick={() => navigate("listing-detail", l.id)} className="overflow-hidden">
+                    <Card key={l.id} hover={canModifyProperty} onClick={() => { if (canModifyProperty) navigate("listing-detail", l.id); }} className="overflow-hidden">
                       <div 
                         className="h-28 relative flex items-end p-4 bg-gradient-to-br from-slate-400 to-slate-600"
                         style={
@@ -622,7 +672,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
           <div className="max-w-5xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">وظایف مرتبط با این ملک</h3>
-              <Btn variant="primary" size="sm" onClick={() => navigate("tasks-kanban")}>
+              <Btn variant="primary" size="sm" disabled={!canModifyProperty} onClick={() => navigate("tasks-kanban")}>
                 <Plus size={13} />ایجاد وظیفه
               </Btn>
             </div>
@@ -635,7 +685,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                 icon={<CheckSquare size={28} />}
                 title="وظیفه‌ای وجود ندارد"
                 description="هنوز وظیفه‌ای برای این ملک ثبت نشده است."
-                action={<Btn variant="primary" size="sm" onClick={() => navigate("tasks-kanban")}><Plus size={13} />ایجاد اولین وظیفه</Btn>}
+                action={<Btn variant="primary" size="sm" disabled={!canModifyProperty} onClick={() => navigate("tasks-kanban")}><Plus size={13} />ایجاد اولین وظیفه</Btn>}
               />
             ) : (
               <div className="space-y-3">
@@ -669,7 +719,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
           <div className="max-w-5xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">پیگیری‌های این ملک</h3>
-              <Btn variant="primary" size="sm" onClick={() => navigate("create-followup")}>
+              <Btn variant="primary" size="sm" disabled={!canModifyProperty} onClick={() => navigate("create-followup")}>
                 <Plus size={13} />ثبت پیگیری
               </Btn>
             </div>
@@ -682,7 +732,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                 icon={<BellRing size={28} />}
                 title="پیگیری‌ای وجود ندارد"
                 description="هنوز پیگیری برای این ملک ثبت نشده است."
-                action={<Btn variant="primary" size="sm" onClick={() => navigate("create-followup")}><Plus size={13} />ثبت اولین پیگیری</Btn>}
+                action={<Btn variant="primary" size="sm" disabled={!canModifyProperty} onClick={() => navigate("create-followup")}><Plus size={13} />ثبت اولین پیگیری</Btn>}
               />
             ) : (
               <div className="relative">
