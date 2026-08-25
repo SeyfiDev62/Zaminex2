@@ -12,6 +12,7 @@ import { EmptyState } from "../../../shared/components/ui/EmptyState";
 import { PageHeader } from "../../../shared/components/ui/PageHeader";
 import { apiFetch, readJson, apiErrorMessage, getCsrfToken } from "../../../shared/lib/apiClient";
 import { toast } from "../../../shared/lib/utils";
+import { ConfirmModal } from "../../../shared/components/ConfirmModal";
 import { Building2, LayoutDashboard, FileText, CheckSquare, Users, BarChart3, Settings, Bell, Search, LogOut, Plus, ChevronLeft, ChevronDown, ChevronRight, Clock, CheckCircle2, AlertCircle, MoreHorizontal, MapPin, Eye, Edit2, Trash2, Archive, Phone, Mail, Calendar, TrendingUp, Activity, Command, Star, List, LayoutGrid, Download, Shield, User, Lock, Key, RefreshCw, Circle, Zap, Target, Award, Upload, Check, AlertTriangle, Info, XCircle, Loader2, CircleCheck, TriangleAlert, Columns, Send, BellRing, X, ChevronUp, SlidersHorizontal, ArrowUpRight, Layers, MessageSquare, Sparkles, GripVertical, MoreVertical, Building, History, Flame, Image, Filter, SlidersVertical } from "lucide-react";
 import { AttributeCombobox } from "../../../shared/components/ui/AttributeCombobox";
 
@@ -116,6 +117,10 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     searchable: true,
   });
   const [adding, setAdding] = useState(false);
+  // Native window.confirm has no branding and does not match the app; the
+  // destructive confirmations below use the shared ConfirmModal instead.
+  const [pendingDelete, setPendingDelete] = useState<Attribute | null>(null);
+  const [pendingUnbind, setPendingUnbind] = useState<Binding | null>(null);
 
   // --- bindings ---------------------------------------------------------
   const [propertyTypes, setPropertyTypes] = useState<TypeRow[]>([]);
@@ -241,11 +246,14 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   };
 
-  const handleDelete = async (row: Attribute) => {
-    const warning = row.usageCount
-      ? `«${row.displayName}» به ${row.usageCount.toLocaleString("fa-IR")} نوع متصل است. حذف شود؟`
-      : `آیا از حذف ویژگی «${row.displayName}» مطمئن هستید؟`;
-    if (!confirm(warning)) return;
+  const handleDelete = (row: Attribute) => {
+    setPendingDelete(row);
+  };
+
+  const confirmDelete = async () => {
+    const row = pendingDelete;
+    if (!row) return;
+    setPendingDelete(null);
     try {
       const res = await apiFetch(`/basics/api/attributes/${row.id}/`, { method: "DELETE" }, csrfToken);
       if (res.ok || res.status === 204) {
@@ -342,8 +350,14 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   };
 
-  const handleUnbind = async (row: Binding) => {
-    if (!confirm(`«${row.attributeDetail.displayName}» از این نوع حذف شود؟`)) return;
+  const handleUnbind = (row: Binding) => {
+    setPendingUnbind(row);
+  };
+
+  const confirmUnbind = async () => {
+    const row = pendingUnbind;
+    if (!row) return;
+    setPendingUnbind(null);
     const path = bindKind === "property"
       ? `/basics/api/property-type-attributes/${row.id}/`
       : `/basics/api/deal-type-attributes/${row.id}/`;
@@ -721,6 +735,29 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
           </Card>
         </>
       )}
+
+      <ConfirmModal
+        open={pendingDelete !== null}
+        danger
+        title="حذف ویژگی؟"
+        message={
+          pendingDelete
+            ? pendingDelete.usageCount
+              ? `«${pendingDelete.displayName}» به ${pendingDelete.usageCount.toLocaleString("fa-IR")} نوع متصل است. با حذف آن، این وصل‌ها نیز برداشته می‌شوند.`
+              : `ویژگی «${pendingDelete.displayName}» برای همیشه حذف می‌شود. آیا مطمئن هستید؟`
+            : ""
+        }
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
+      <ConfirmModal
+        open={pendingUnbind !== null}
+        danger
+        title="حذف اتصال؟"
+        message={pendingUnbind ? `«${pendingUnbind.attributeDetail.displayName}» از این نوع جدا می‌شود و دیگر در فرم آن نمایش داده نمی‌شود.` : ""}
+        onConfirm={confirmUnbind}
+        onCancel={() => setPendingUnbind(null)}
+      />
     </div>
   );
 }
