@@ -228,7 +228,15 @@ function PropertyMapPicker({
     setSearchNoResult(false);
     setSearching(true);
     try {
-      const resolved = await resolvePlaceCoordinates(q.trim(), "district");
+      // Scope the search with the selected city/province: a neighbourhood
+      // name typed bare (e.g. «گلستان») exists in many cities, and the
+      // selected context is what makes it resolve the exact one. A place
+      // outside the province still resolves — the bounded search simply
+      // falls back to the unbounded one.
+      const resolved = await resolvePlaceCoordinates(q.trim(), "district", {
+        provinceName,
+        cityName,
+      });
       if (resolved) {
         setFocusTarget({ location: resolved, zoom: 15 });
         setQ("");
