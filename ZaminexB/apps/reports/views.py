@@ -6,10 +6,9 @@ from rest_framework.views import APIView
 
 from apps.properties.models import Property
 
+from .caching import cached_consultant_scope_report, cached_property_report
 from .services import (
     accessible_properties,
-    compute_consultant_scope_report,
-    compute_property_report,
     get_property_for_user_or_403,
     property_report_csv_rows,
     render_csv,
@@ -52,7 +51,9 @@ class PropertyReportView(APIView):
             "date_to": _parse_date(request.query_params.get("date_to")),
         }
         filters = {k: v for k, v in filters.items() if v is not None}
-        return pid, compute_property_report(prop, filters=filters)
+        # Phase 4: the shared report cache — the JSON page, CSV export,
+        # PDF export and the AI input all serve from the same entry.
+        return pid, cached_property_report(prop, filters=filters)
 
     def get(self, request, property_id):
         try:
@@ -167,7 +168,7 @@ class PropertyReportPdfView(APIView):
             "date_to": _parse_date(request.query_params.get("date_to")),
         }
         filters = {k: v for k, v in filters.items() if v is not None}
-        report = compute_property_report(prop, filters=filters)
+        report = cached_property_report(prop, filters=filters)
 
         # Record the export in the activity log, mirroring the CSV export.
         from apps.common.activity import log_activity
@@ -204,7 +205,7 @@ class ConsultantScopeReportView(APIView):
     permission_classes = [IsAuthenticatedRole]
 
     def get(self, request):
-        data = compute_consultant_scope_report(request.user)
+        data = cached_consultant_scope_report(request.user)
         return Response(data)
 
 

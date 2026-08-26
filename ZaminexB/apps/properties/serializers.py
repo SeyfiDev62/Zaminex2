@@ -12,7 +12,10 @@ from apps.basics.models import (
     PropertyUsage,
 )
 from apps.common.attribute_serializers import AttributeValuesMixin
-from apps.common.metrics import build_neighborhood_price_stats_map, property_market_metrics
+from apps.common.metrics import (
+    cached_neighborhood_price_stats_map,
+    property_market_metrics,
+)
 
 from .models import Property, PropertyAppraisalReport, PropertyAttributeValue, PropertyImage
 
@@ -254,7 +257,11 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
     def _market_metrics(self, obj):
         cache = getattr(self, "_neighborhood_avg_cache", None)
         if cache is None:
-            cache = build_neighborhood_price_stats_map()
+            # Phase 4: the neighbourhood price-stats map is shared (and
+            # short-TTL cached) across requests instead of being rebuilt per
+            # serializer instance; the instance attr memoises it within one
+            # response that serialises several properties.
+            cache = cached_neighborhood_price_stats_map()
             setattr(self, "_neighborhood_avg_cache", cache)
         if not hasattr(self, "_property_metrics_cache"):
             setattr(self, "_property_metrics_cache", {})

@@ -228,3 +228,44 @@ dead-cache fail-open (DB fallback), and the throttle counter shared across
 two connections. Live verification against a real Redis 6.0.9 covered the
 same scenarios end to end, including kill-Redis-mid-run → request served
 from the DB row with zero LLM calls.
+
+## Phase 4 results — caching the heavy aggregations
+
+The four heaviest read-side computations are now behind short-TTL caches
+(TTL + signal invalidation + stampede lock, all via the Phase-2/3
+`cache_utils` infrastructure; report:
+`benchmarks/reports/benchmark-phase4.json`):
+
+| what | key | TTL | invalidation |
+|---|---|---|---|
+| property report (JSON/CSV/PDF/AI input) | `report:property:<id>` (one key holds all date-range variants) | 120 s | save/delete of the property, its listings/tasks/follow-ups/images |
+| consultant scope report | `report:consultant:<user_id>` | 60 s | save/delete of the consultant's tasks/follow-ups/listings/properties (+ all admins — whole-portfolio scope) |
+| neighbourhood price-stats map (detail page deviation index) | `stats:neighborhoods` | 60 s | property/listing saves (price/area/status inputs) |
+| dashboard bundle (`/analytics/dashboard/`) | `dashboard:<user_id>` | 60 s | the same signals, for the affected users + admins |
+
+Every entry is fail-open (dead cache → uncached behaviour, never an error —
+verified live with a real connection-refused Redis), and the signals are
+fail-open too (a cache outage during a save never breaks the write; the TTL
+is the backstop).
+
+### Before → after (same machine; the benchmark warm-up populates the caches)
+
+| path | p50 ms | queries |
+|---|---:|---:|
+| dashboard-analytics | 12559.8 → **11.3** | 9000+ → 5 |
+| property-report | 47.1 → **7.6** | 19 → 10 |
+| properties-detail | 25.5 → **12.8** | 14 → 12 (stats map cached) |
+| every other path | flat | flat |
+
+Note the honest semantics: within a TTL the dashboard/report serve the
+last-computed snapshot (that is the point); any save on the related models
+drops the exact keys, so the next read is fresh. Live verification against a
+real Redis 6.0.9: a second process serves the dashboard in 6 queries
+(was 160) and the report in 11 (was 19); saving a listing makes the next
+report recompute (20 queries); killing Redis mid-run still serves 200s.
+
+Tested by `apps/common/tests/test_phase4_caching.py` (17 tests): hit/miss on
+all four entries, range-variant coexistence, invalidation on every related
+model (the roadmap acceptance: save a listing → report refreshes),
+per-user isolation (scope reports, dashboards), and fail-open (dead cache
+during reads *and* during saves).
