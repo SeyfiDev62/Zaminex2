@@ -34,6 +34,7 @@ from .validators import validate_appraisal_pdf, validate_property_image
 from .serializers import (
     PropertyAppraisalReportSerializer,
     PropertyImageSerializer,
+    PropertyListSerializer,
     PropertySerializer,
 )
 from apps.common.pagination import StandardResultsSetPagination
@@ -43,6 +44,14 @@ class PropertyViewSet(viewsets.ModelViewSet):
     serializer_class = PropertySerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardResultsSetPagination
+
+    def get_serializer_class(self):
+        # Phase 1: the list response carries the slim payload; everything
+        # else (detail, create, update, custom actions) keeps the full
+        # serializer so the detail page and the wizards are untouched.
+        if self.action == "list":
+            return PropertyListSerializer
+        return PropertySerializer
 
     def get_queryset(self):
         user = self.request.user
@@ -55,25 +64,31 @@ class PropertyViewSet(viewsets.ModelViewSet):
         #   district chain           → `locationPath`
         #   attribute_values         → the dynamic attributes
         #   appraisal_report         → the attached PDF metadata
-        qs = (
-            Property.objects.select_related(
-                "consultant",
-                "property_type_ref",
-                "property_usage",
-                "district",
-                "district__city",
-                "district__city__province",
+        qs = Property.objects.select_related(
+            "consultant",
+            "property_type_ref",
+            "property_usage",
+            "district",
+            "district__city",
+            "district__city__province",
+        )
+        if self.action == "list":
+            # The slim list serializer only reads the gallery (imageUrl) and
+            # the derived price — everything else the full serializer needs
+            # (followups/tasks/attributes/appraisal report) is fetched only
+            # for the non-list actions.
+            qs = qs.prefetch_related("images", "listings__deal_type")
+        else:
+            qs = qs.select_related(
                 "appraisal_report",
                 "appraisal_report__uploaded_by",
-            )
-            .prefetch_related(
+            ).prefetch_related(
                 "images",
                 "followups",
                 "tasks",
                 "listings__deal_type",
                 "attribute_values__attribute",
             )
-        )
 
         # Read-only access to *every* property in the system for the consultant
         # "همه املاک" tab. Only honoured for GET requests so a consultant can
@@ -165,8 +180,12 @@ class PropertyViewSet(viewsets.ModelViewSet):
         if price_min or price_max:
             qs = self._filter_by_price(qs, price_min, price_max)
 
+        # Admins filter any list by consultant; consultants may do the same on
+        # the read-only "همه املاک" (scope=all) list — it already exposes every
+        # property to them, so a consultant filter only ever narrows what they
+        # can already see.
         consultant_id = self.request.query_params.get("consultantId")
-        if consultant_id and django_role == "ADMIN":
+        if consultant_id and (django_role == "ADMIN" or scope_all):
             qs = qs.filter(consultant_id=consultant_id)
 
         # Filters generated from the property type's search attributes, sent as

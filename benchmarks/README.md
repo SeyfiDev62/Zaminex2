@@ -91,3 +91,50 @@ A performance "regression" is: a new failure in the Django test suite
 beyond the 49 pre-existing ones, **or** a >20% latency increase of a
 baseline path on the same machine after a phase that is not supposed to
 affect it.
+
+## Phase 1 results — slim list serializer + real pagination
+
+The list endpoints (`/properties/api/properties/`, `/listings/api/listings/`)
+now answer the `list` action with a slim read-only serializer
+(`PropertyListSerializer` / `ListingListSerializer`): the detail-only payload
+(description, full gallery → replaced by `imageUrl`, appraisal report,
+dynamic attributes, the per-row market/metric blocks, the creator profile,
+`priceDetails`) is dropped, and the remaining per-row fields are served from
+prefetched relations plus one batched query for the effective property price
+(`PropertyMiniSerializer` now reads `effective_price_map` from the serializer
+context). Detail, create and update responses are byte-for-byte the full
+serializer — only list responses changed shape.
+
+Frontend: the consultant «ملک‌های من» / «همه املاک» tabs
+(`PropertiesListView`) moved from client-side filtering of the 1000-row fetch
+to real server-side pagination (page/page_size + q + the same filter params
+the admin list already uses); the card views read `imageUrl`. The read-only
+`scope=all` list additionally honours `consultantId` (the tab's consultant
+filter under server-side pagination — it only ever narrows what `scope=all`
+already exposes).
+
+### Before → after (same machine, 1000 seeded properties / 2000 listings)
+
+| path | p50 ms | p50 Δ | payload KB | queries |
+|---|---:|---:|---:|---:|
+| properties-list-p1000 | 654.6 → **434.7** | −34% | 1352.7 → 1004.3 | 15 → 10 |
+| properties-list-page1-p20 | 47.2 → **24.5** | −48% | 27.2 → 20.2 | 15 → 10 |
+| properties-list-page50-p20 | 47.8 → **25.6** | −46% | 27.1 → 20.2 | 15 → 10 |
+| properties-search-p20 | 73.1 → **55.9** | −24% | 26.4 → 20.3 | 16 → 11 |
+| properties-detail (unchanged path) | 27.9 → **35.2**¹ | flat | 1.3 | 14 |
+| listings-list-p1000 | 8284.8 → **367.6** | **−96%** | 1147.8 → 770.8 | **8008 → 12** |
+| listings-list-page1-p20 | 174.1 → **42.1** | −76% | 23.1 → 15.5 | 168 → 12 |
+| listings-search-p20 | 212.6 → **81.6** | −62% | 23.1 → 15.6 | 169 → 14 |
+| dashboard-analytics (Phase 4 target) | 13759.9 → 13667.9 | flat | 4.1 | ≥9000 |
+| property-report (unchanged path) | 42.8 → 46.5 | flat | 3.2 | 19 |
+
+¹ `properties-detail` p50 is flat (27.9 → 29.4–35.2 ms, 14 queries both
+ways); the p95 of a single 5-run sample picked up one sandbox stall and is
+not a code-path change.
+
+The headline: the listings list went from **8008 queries / 8.3 s** to **12
+queries / 0.37 s** at 1000 rows — the N+1 is gone and the count is now
+independent of page size. Guarded by
+`PropertyListQueryCountTests` / `ListingListQueryCountTests` (query-count
+flatness) and the shape tests in `apps/properties/test_list_serializer.py` /
+`apps/listings/tests.py`.

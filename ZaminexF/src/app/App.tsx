@@ -1819,6 +1819,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
           <MyPropertiesPage
             navigate={navigate}
             properties={properties}
+            consultants={consultants}
             consultantId={currentConsultantId}
             openPropertyDetail={openPropertyDetail}
             openPropertyEdit={openPropertyEdit}
@@ -1832,6 +1833,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
           <AllPropertiesPage
             navigate={navigate}
             properties={allProperties}
+            consultants={consultants}
             consultantId={currentConsultantId}
             openPropertyDetail={openPropertyDetail}
             openPropertyEdit={openPropertyEdit}

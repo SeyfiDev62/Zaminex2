@@ -406,3 +406,64 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
             instance, instance.property_type_ref, "attribute_links"
         )
         return instance
+
+
+# Fields the list serializer drops from the full payload. They are sized for
+# one property at a time (the detail page and the edit wizard) and multiply
+# ~12x on a 1000-row list for data no list screen renders:
+#   description / images / appraisalReport → detail + wizard only;
+#   attributes / attributeDetails         → detail + wizard only;
+#   the market-metric block (pricePerSqm … views) → computed per row for the
+#   detail page; the dashboards get their figures from the analytics endpoint.
+_PROPERTY_LIST_EXCLUDED = {
+    "description",
+    "images",
+    "appraisalReport",
+    "attributes",
+    "attributeDetails",
+    "pricePerSqm",
+    "imagesCount",
+    "daysOnMarket",
+    "spatialDensityRatio",
+    "priceDeviationIndex",
+    "geoPrecisionFlag",
+    "engagementHeatScore",
+    "views",
+}
+
+
+class PropertyListSerializer(PropertySerializer):
+    """Slim read-only serializer for list responses (Phase 1).
+
+    Keeps every field the list screens actually read — the card/table views,
+    the dashboard composition + distribution maps, the property comboboxes
+    and the add-listing wizard — and drops the detail-only payload described
+    above. ``imageUrl`` (the first gallery photo) replaces the whole
+    ``images`` array: the card views only ever render the first image.
+
+    Read-only by construction: it is only ever used for ``list`` responses,
+    so no write path can pick it up.
+    """
+
+    imageUrl = serializers.SerializerMethodField()
+
+    class Meta(PropertySerializer.Meta):
+        fields = [
+            field
+            for field in PropertySerializer.Meta.fields
+            if field not in _PROPERTY_LIST_EXCLUDED
+        ] + ["imageUrl"]
+
+    def get_imageUrl(self, obj):
+        """First gallery image (absolute URL) or ``None``.
+
+        The list view prefetched ``images``, so this never issues a query per
+        row; properties without photos simply get the gradient fallback on
+        the client.
+        """
+        request = self.context.get("request")
+        first_image = obj.images.first()
+        if first_image is not None and first_image.image:
+            url = first_image.image.url
+            return request.build_absolute_uri(url) if request else url
+        return None

@@ -4,7 +4,9 @@ from decimal import Decimal
 import jdatetime
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -474,3 +476,222 @@ class MonthlyRevenueJalaliTests(TestCase):
         self.assertAlmostEqual(volumes["sale"], 3.0)
         self.assertAlmostEqual(volumes["mortgage_rent"], 0.8)
         self.assertAlmostEqual(volumes["full_mortgage"], 2.0)
+
+
+# --------------------------------------------------------------------------- #
+#  Phase 1 — slim list serializer for the listings list
+# --------------------------------------------------------------------------- #
+
+
+class ListingListSerializerShapeTests(TestCase):
+    """The list response carries the slim payload; detail stays full.
+
+    The list screens read the card/table columns plus the two KPIs
+    (``score`` / ``views``). Everything else — description, dynamic
+    attributes, the per-row marketing metrics, the creator's profile and
+    ``priceDetails`` — is detail-only and must not ship with a 1000-row list.
+    """
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="lls-admin", password="pw", role="ADMIN"
+        )
+        self.agent = User.objects.create_user(
+            username="lls-agent", password="pw", role="AGENT"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+        self.property = Property.objects.create(
+            title="آپارتمان بنچمارک",
+            internal_code="ZF_4001",
+            consultant=self.agent,
+            area=120,
+            address="تهران نیاوران",
+            description="توضیحات ملک تست",
+        )
+        self.listing = Listing.objects.create(
+            property=self.property,
+            title="فروش آپارتمان بنچمارک",
+            description="توضیحات آگهی تست",
+            publish_channel="WEBSITE",
+            created_by=self.agent,
+            assigned_to=self.agent,
+            status=Listing.Status.ACTIVE,
+            sale_price=Decimal("5000000000"),
+            start_date=timezone.now().date(),
+        )
+
+    def test_list_response_uses_the_slim_serializer(self):
+        res = self.client.get("/listings/api/listings/", {"page_size": 10})
+        self.assertEqual(res.status_code, 200)
+        row = res.json()["results"][0]
+
+        for field in (
+            "description",
+            "attributes",
+            "attributeDetails",
+            "created_by_detail",
+            "priceDetails",
+            "effectiveExposureDays",
+            "delegationIndicator",
+            "isBurnedListing",
+            "generatedHighProbLeads",
+            "contentRichnessScore",
+            "engagementHeatScore",
+        ):
+            self.assertNotIn(field, row)
+
+        for field in (
+            "id",
+            "title",
+            "status",
+            "channels",
+            "created_at",
+            "assigned_to",
+            "assigned_to_detail",
+            "property",
+            "property_detail",
+            "score",
+            "views",
+            "dealTypeDisplay",
+            "salePrice",
+            "deposit",
+            "monthlyRent",
+        ):
+            self.assertIn(field, row)
+
+    def test_detail_response_keeps_the_full_serializer(self):
+        res = self.client.get(f"/listings/api/listings/{self.listing.id}/")
+        self.assertEqual(res.status_code, 200)
+        row = res.json()
+        for field in (
+            "description",
+            "attributes",
+            "attributeDetails",
+            "created_by_detail",
+            "effectiveExposureDays",
+            "delegationIndicator",
+            "isBurnedListing",
+            "generatedHighProbLeads",
+            "contentRichnessScore",
+            "engagementHeatScore",
+        ):
+            self.assertIn(field, row)
+
+    def test_property_detail_price_comes_from_the_batched_map(self):
+        # A second, higher sale listing must raise the effective price to the
+        # highest sale-like figure — the same rule the detail endpoint uses.
+        Listing.objects.create(
+            property=self.property,
+            title="فروش با قیمت بالاتر",
+            publish_channel="INSTAGRAM",
+            created_by=self.agent,
+            status=Listing.Status.ACTIVE,
+            sale_price=Decimal("7000000000"),
+            start_date=timezone.now().date(),
+        )
+        res = self.client.get("/listings/api/listings/", {"page_size": 10})
+        rows = res.json()["results"]
+        prices = {r["property_detail"]["price"] for r in rows}
+        self.assertIn("7000000000", prices)
+
+    def test_property_detail_price_falls_back_to_legacy_column(self):
+        # No sale-like listings at all → the legacy property.price column.
+        prop = Property.objects.create(
+            title="ملک بدون آگهی فروش",
+            internal_code="ZF_4002",
+            consultant=self.agent,
+            area=80,
+            address="تهران",
+            price=Decimal("1234567890"),
+        )
+        Listing.objects.create(
+            property=prop,
+            title="اجاره ملک بدون آگهی فروش",
+            publish_channel="WEBSITE",
+            created_by=self.agent,
+            status=Listing.Status.ACTIVE,
+            monthly_rent=Decimal("10000000"),
+            start_date=timezone.now().date(),
+        )
+        res = self.client.get(
+            "/listings/api/listings/",
+            {"property": prop.id, "include_sold": "true", "page_size": 10},
+        )
+        rows = res.json()["results"]
+        self.assertEqual(rows[0]["property_detail"]["price"], "1234567890")
+
+    def test_assigned_to_detail_keeps_name_and_mobile(self):
+        res = self.client.get("/listings/api/listings/", {"page_size": 10})
+        row = res.json()["results"][0]
+        self.assertEqual(row["assigned_to_detail"]["name"], "lls-agent")
+        self.assertIn("mobile", row["assigned_to_detail"])
+
+
+class ListingListQueryCountTests(TestCase):
+    """The N+1 guard: list queries must not grow with the row count.
+
+    Phase 0 measured 8008 queries for a 1000-row listings list (~8 per row:
+    the property price derivation, the engagement metrics, the high-probability
+    follow-up count and the user profiles). Phase 1 batches the price and
+    prefetches everything the slim serializer reads, so the count must stay
+    flat.
+    """
+
+    def setUp(self):
+        # The admin sees every row, so the page below carries all of them.
+        self.admin = User.objects.create_user(
+            username="lqc-admin", password="pw", role="ADMIN"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    @staticmethod
+    def _seed(n_properties, code_base):
+        agent = User.objects.create_user(
+            username=f"lqc-agent-{code_base}", password="pw", role="AGENT"
+        )
+        for i in range(n_properties):
+            prop = Property.objects.create(
+                title=f"ملک {code_base} عدد {i}",
+                internal_code=f"ZF_{code_base}{i:02d}",
+                consultant=agent,
+                area=90,
+                address="تهران",
+                description="توضیحات " * 4,
+            )
+            for j in range(2):
+                Listing.objects.create(
+                    property=prop,
+                    title=f"آگهی {code_base}-{i}-{j}",
+                    description="توضیحات آگهی " * 3,
+                    publish_channel="WEBSITE",
+                    created_by=agent,
+                    assigned_to=agent,
+                    status=Listing.Status.ACTIVE,
+                    sale_price=Decimal(1000000000 * (1 + i % 9)),
+                    start_date=timezone.now().date(),
+                )
+
+    def _counted_get(self, page_size):
+        with CaptureQueriesContext(connection) as ctx:
+            res = self.client.get("/listings/api/listings/", {"page_size": page_size})
+        self.assertEqual(res.status_code, 200)
+        return len(ctx.captured_queries), res
+
+    def test_list_query_count_stays_flat(self):
+        self._seed(10, 50)  # 20 listings
+        small, res = self._counted_get(200)
+        self.assertEqual(len(res.json()["results"]), 20)
+
+        self._seed(40, 60)  # +80 listings → 100 rows on the same page
+        large, res = self._counted_get(200)
+        self.assertEqual(len(res.json()["results"]), 100)
+
+        self.assertLess(
+            large,
+            50,
+            "a 100-row listings list must run a small constant number of queries",
+        )
+        self.assertLessEqual(large, small + 2)

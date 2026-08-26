@@ -291,22 +291,27 @@ class AnalyticsAPITests(TestCase):
         sale.delete()
 
     def test_property_api_includes_metrics(self):
+        # Phase 1: the market-metric block lives on the detail response; the
+        # list response is the slim serializer (no pricePerSqm & co).
         self.client.force_authenticate(user=self.admin)
-        res = self.client.get("/properties/api/properties/")
+        res = self.client.get(f"/properties/api/properties/{self.prop.id}/")
         self.assertEqual(res.status_code, 200)
-        items = res.json()
-        if isinstance(items, dict):
-            items = items.get("results", [])
-        self.assertTrue(any("pricePerSqm" in p for p in items))
+        self.assertIn("pricePerSqm", res.json())
 
     def test_listing_api_includes_metrics(self):
+        # Phase 1: the per-row marketing metrics live on the detail response;
+        # the list response is the slim serializer (no contentRichnessScore).
+        listing = Listing.objects.create(
+            property=self.prop,
+            title="Metrics listing",
+            publish_channel=Listing.PublishChannel.WEBSITE,
+            created_by=self.agent,
+            status=Listing.Status.ACTIVE,
+        )
         self.client.force_authenticate(user=self.admin)
-        res = self.client.get("/listings/api/listings/")
+        res = self.client.get(f"/listings/api/listings/{listing.id}/")
         self.assertEqual(res.status_code, 200)
-        items = res.json()
-        if isinstance(items, dict):
-            items = items.get("results", [])
-        self.assertTrue(any("contentRichnessScore" in item for item in items))
+        self.assertIn("contentRichnessScore", res.json())
 
 
 class ConsultantRankingMetricsTests(TestCase):

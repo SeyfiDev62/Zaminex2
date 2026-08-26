@@ -329,7 +329,12 @@ class QueryCountTests(TestCase):
     def test_the_query_count_does_not_grow_with_the_number_of_rows(self):
         self.client.force_login(self.admin)
 
-        with self.assertNumQueries(15):
+        # Phase 1 constant: session/auth + count + the page SELECT
+        # (select_related chain) + the two list prefetches
+        # (images, listings__deal_type). Before Phase 1 this was 15 — the
+        # full serializer also prefetched followups/tasks/attribute values
+        # and built the neighbourhood price-stats map.
+        with self.assertNumQueries(10):
             response = self.client.get("/properties/api/properties/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["results"]), 6)

@@ -11,7 +11,7 @@ from apps.common.fuzzy_search import apply_fuzzy_search
 from apps.common.pagination import StandardResultsSetPagination
 from apps.properties.models import Property
 from .models import Listing
-from .serializers import ListingSerializer
+from .serializers import ListingListSerializer, ListingSerializer
 
 
 def _sync_property_status_from_listings(listing):
@@ -62,18 +62,61 @@ class ListingViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = StandardResultsSetPagination
 
+    def get_serializer_class(self):
+        # Phase 1: the list response carries the slim payload; everything
+        # else (detail, create, update, status actions) keeps the full
+        # serializer so the detail page and the edit wizard are untouched.
+        if self.action == "list":
+            return ListingListSerializer
+        return ListingSerializer
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if self.action == "list":
+            # One query for the effective sale price of every property in the
+            # filtered list, shared by all rows' ``property_detail.price``
+            # (see PropertyMiniSerializer.get_price). Without this, each row
+            # re-read its property's listings — the 8000-query list of Phase 0.
+            from apps.common.metrics import annotate_effective_prices
+
+            property_ids = set(
+                self.filter_queryset(self.get_queryset())
+                .values_list("property_id", flat=True)
+            )
+            context["effective_price_map"] = annotate_effective_prices(property_ids)
+        return context
+
     def get_queryset(self):
         user = self.request.user
         if user.role == "ADMIN":
             qs = Listing.objects.all().select_related(
                 'property', 'created_by', 'assigned_to', 'deal_type'
-            ).prefetch_related('property__images')
+            )
         else:
             qs = Listing.objects.filter(
                 Q(created_by=user) | Q(assigned_to=user)
-            ).select_related('property', 'created_by', 'assigned_to', 'deal_type').prefetch_related(
-                'property__images'
+            ).select_related('property', 'created_by', 'assigned_to', 'deal_type')
+
+        if self.action == "list":
+            # The slim list serializer's per-row fields are the property's
+            # first photo, the KPI pair (score/views) and the assigned
+            # consultant's name+mobile. Prefetch/select everything they read
+            # so serializing N rows never costs N queries:
+            #   property__images        → property_detail.image_url + score
+            #   property__followups/tasks → the ``views`` KPI
+            #   assigned_to__consultant_profile → assigned_to_detail.mobile
+            # (the full serializer's property__images stays for the other
+            # actions).
+            qs = qs.select_related(
+                'assigned_to__consultant_profile',
+                'created_by__consultant_profile',
+            ).prefetch_related(
+                'property__images',
+                'property__followups',
+                'property__tasks',
             )
+        else:
+            qs = qs.prefetch_related('property__images')
 
         # List-only filters (hide SOLD, search, price …) must not
         # apply to retrieve/update/actions. Otherwise opening a sold listing
