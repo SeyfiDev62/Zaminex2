@@ -17,10 +17,14 @@ Design rules
 * **Honest metrics**: one warm-up request per path is discarded (connection
   pool, plan cache), then ``--runs`` measured runs. Reported per path:
   latency P50/P95/max/mean, payload bytes, SQL query count and DB time.
-* **Both patterns measured**: the current frontend pattern (``page_size=1000``
-  in one request) and the target pattern (``page_size=20`` + ``page``) — the
-  gap between the two is the Phase 1 payoff. Deep pages (``page=50``) are
-  measured too, as the trigger data for future keyset pagination.
+* **All production patterns measured**: the paginated list
+  (``page_size=20`` + ``page``), the "fetch every row" pattern the
+  comboboxes/maps use after the Phase-1 100-row guard
+  (``*_all_100loop``: pages of 100 until done), search, detail, dashboard
+  and report. The legacy ``*_p1000`` paths stay as guard checks — they
+  request ``page_size=1000`` and measure how cheaply the server clamps it
+  to 100 rows. Deep pages (``page=50``) are measured too, as the trigger
+  data for future keyset pagination.
 
 Usage
 -----
@@ -409,6 +413,44 @@ class Command(BaseCommand):
             "db_ms": round(sum(float(q["time"]) for q in ctx.captured_queries) * 1000.0, 2),
         }
 
+    def _time_request_loop(self, client, first_url, page_size=100, max_pages=50):
+        """Measure the Phase-1 "fetch every row" pattern.
+
+        The 100-row ``max_page_size`` guard makes a single bulk request
+        impossible, so comboboxes/maps page through the list in 100-row
+        steps. This times the whole loop (all pages) and reports the totals
+        in the same sample shape as :meth:`_time_request`.
+        """
+        connection.queries_log.clear()
+        with CaptureQueriesContext(connection) as ctx:
+            t0 = time.perf_counter()
+            total_bytes = 0
+            status = None
+            page = 1
+            while page <= max_pages:
+                url = first_url if page == 1 else f"{first_url}&page={page}"
+                response = client.get(url)
+                total_bytes += len(response.content)
+                status = response.status_code
+                try:
+                    data = response.json()
+                except Exception:
+                    break
+                if not isinstance(data, dict):
+                    break
+                rows = data.get("results") or []
+                if len(rows) < page_size:
+                    break
+                page += 1
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return {
+            "status": status,
+            "ms": elapsed_ms,
+            "bytes": total_bytes,
+            "queries": len(ctx.captured_queries),
+            "db_ms": round(sum(float(q["time"]) for q in ctx.captured_queries) * 1000.0, 2),
+        }
+
     def _aggregate(self, samples):
         latencies = [s["ms"] for s in samples]
         return {
@@ -478,18 +520,25 @@ class Command(BaseCommand):
 
         q = quote("آپارتمان")
         paths = {
-            # current production pattern (what the frontend sends today)
+            # Phase-1 guard check: a legacy page_size=1000 request is now
+            # clamped to 100 rows — measures that the clamp is cheap.
             "properties-list-p1000": "/properties/api/properties/?page_size=1000",
             # target pattern (Phase 1) + deep page (OFFSET cost)
             "properties-list-page1-p20": "/properties/api/properties/?page=1&page_size=20",
             "properties-list-page50-p20": "/properties/api/properties/?page=50&page_size=20",
             "properties-search-p20": f"/properties/api/properties/?q={q}&page_size=20",
             "properties-detail": f"/properties/api/properties/{detail_prop.pk}/",
+            # legacy page_size=1000 → clamped to 100 by the Phase-1 guard
             "listings-list-p1000": "/listings/api/listings/?page_size=1000",
             "listings-list-page1-p20": "/listings/api/listings/?page=1&page_size=20",
             "listings-search-p20": f"/listings/api/listings/?q={q}&page_size=20",
             "dashboard-analytics": "/common/api/analytics/dashboard/",
             "property-report": f"/api/reports/properties/{report_prop.pk}/",
+        }
+        # The "give me every row" production pattern after Phase 1: the
+        # 100-row cap forces comboboxes/maps to page through the list.
+        loop_paths = {
+            "properties-list-all-100loop": "/properties/api/properties/?page_size=100",
         }
 
         # Django's test client defaults to the host "testserver", which is
@@ -500,9 +549,16 @@ class Command(BaseCommand):
 
         results = {}
         try:
-            for name, url in paths.items():
-                self._time_request(client, url)  # warm-up: discarded
-                samples = [self._time_request(client, url) for _ in range(runs)]
+            for name, url in {**paths, **loop_paths}.items():
+                is_loop = name in loop_paths
+                if is_loop:
+                    self._time_request_loop(client, url)  # warm-up: discarded
+                    samples = [
+                        self._time_request_loop(client, url) for _ in range(runs)
+                    ]
+                else:
+                    self._time_request(client, url)  # warm-up: discarded
+                    samples = [self._time_request(client, url) for _ in range(runs)]
                 results[name] = self._aggregate(samples)
                 if results[name]["status"] != 200:
                     self.stderr.write(f"warning: {name} returned "

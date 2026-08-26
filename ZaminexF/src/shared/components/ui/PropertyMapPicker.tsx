@@ -132,31 +132,55 @@ function PropertyMapPicker({
   // All located properties, drawn as consultant-coloured markers so the
   // user can see the surroundings (and avoid registering on top of another
   // property — the backend rejects exact duplicates as well).
+  // Phase 1: the list caps page_size at 100, so the "every located property"
+  // data is paged through in 100-row steps (same pattern as the combobox
+  // fetch in App.tsx).
   const [located, setLocated] = useState<LocatedProperty[]>([]);
   useEffect(() => {
     if (!csrfToken) return;
     let cancelled = false;
-    apiFetch("/properties/api/properties/?scope=all&page_size=1000", { method: "GET" }, csrfToken)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (cancelled) return;
-        const rows = Array.isArray(data) ? data : (data?.results ?? []);
-        setLocated(
-          rows
-            .filter((r: any) => r.latitude != null && r.longitude != null)
-            .map((r: any) => ({
-              id: r.id,
-              title: r.title || "ملک",
-              lat: Number(r.latitude),
-              lng: Number(r.longitude),
-              status: String(r.propertyStatus || "").toUpperCase(),
-              area: Number(r.area || 0),
-              consultantId: r.consultantId ?? null,
-              consultantName: r.consultantName || "نامشخص",
-            }))
-        );
-      })
-      .catch(() => {});
+    (async () => {
+      const rows: any[] = [];
+      let page = 1;
+      let total = Infinity;
+      try {
+        while (rows.length < total) {
+          const res = await apiFetch(
+            `/properties/api/properties/?scope=all&page=${page}&page_size=100`,
+            { method: "GET" },
+            csrfToken
+          );
+          if (!res.ok) break;
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            rows.push(...data);
+            break;
+          }
+          const items = data.results ?? [];
+          total = data.count ?? items.length;
+          rows.push(...items);
+          if (items.length < 100) break;
+          page += 1;
+        }
+      } catch {
+        // surrounding properties are context only — never block the form.
+      }
+      if (cancelled) return;
+      setLocated(
+        rows
+          .filter((r) => r.latitude != null && r.longitude != null)
+          .map((r) => ({
+            id: r.id,
+            title: r.title || "ملک",
+            lat: Number(r.latitude),
+            lng: Number(r.longitude),
+            status: String(r.propertyStatus || "").toUpperCase(),
+            area: Number(r.area || 0),
+            consultantId: r.consultantId ?? null,
+            consultantName: r.consultantName || "نامشخص",
+          }))
+      );
+    })();
     return () => {
       cancelled = true;
     };

@@ -412,9 +412,13 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
 # one property at a time (the detail page and the edit wizard) and multiply
 # ~12x on a 1000-row list for data no list screen renders:
 #   description / images / appraisalReport → detail + wizard only;
-#   attributes / attributeDetails         → detail + wizard only;
-#   the market-metric block (pricePerSqm … views) → computed per row for the
-#   detail page; the dashboards get their figures from the analytics endpoint.
+#   attributes / attributeDetails → detail + wizard only;
+#   the market-metric block (pricePerSqm, priceDeviationIndex, daysOnMarket,
+#   engagement …) → computed per row for the detail page; the dashboards get
+#   their figures from the analytics endpoint. (``imagesCount`` is *kept*:
+#   the list spec is "imagesCount + first thumbnail instead of the full
+#   gallery" — and it is a cache read on the prefetched gallery, so it costs
+#   no query.)
 _PROPERTY_LIST_EXCLUDED = {
     "description",
     "images",
@@ -422,7 +426,6 @@ _PROPERTY_LIST_EXCLUDED = {
     "attributes",
     "attributeDetails",
     "pricePerSqm",
-    "imagesCount",
     "daysOnMarket",
     "spatialDensityRatio",
     "priceDeviationIndex",
@@ -467,3 +470,13 @@ class PropertyListSerializer(PropertySerializer):
             url = first_image.image.url
             return request.build_absolute_uri(url) if request else url
         return None
+
+    def get_imagesCount(self, obj):
+        """Gallery size as a plain cache read.
+
+        The base implementation derives it through the market-metrics block
+        (which builds the neighbourhood price-stats map — detail-only work).
+        The list view prefetched ``images``, so counting the prefetched rows
+        is query-free.
+        """
+        return len(obj.images.all())

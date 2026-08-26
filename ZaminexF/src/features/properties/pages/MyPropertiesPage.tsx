@@ -49,12 +49,11 @@ function PropertiesListView({
 }: {
   navigate: (p: Page) => void;
   /**
-   * Legacy prop (Phase 0 pattern: the whole 1000-row list fetched once in
-   * App.tsx). Phase 1 moved this list to real server-side pagination — the
-   * rows now come from the paginated endpoint below, so this prop is kept
-   * only for compatibility with the existing call sites.
+   * Legacy prop (pre-Phase 1: the whole 1000-row list fetched once in
+   * App.tsx). This list now paginates on the server — rows come from the
+   * paginated endpoint below — so the prop is optional and unused.
    */
-  properties: Property[];
+  properties?: Property[];
   /** Full consultant directory (from /accounts/consultants/) — powers the
       consultant filter of the «همه املاک» tab, where the rows span every
       consultant and cannot be derived from one page of results. */

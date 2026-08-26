@@ -82,7 +82,7 @@ function PerformanceRadarTick({
   );
 }
 
-function ConsultantDashboard({ navigate, tasks, followups, userName, consultantId, kpis, recentActivities = [], onSaveTask, onDeleteTask, myReport = null, propertyComposition = [], properties = [] }: { 
+function ConsultantDashboard({ navigate, tasks, followups, userName, consultantId, kpis, recentActivities = [], onSaveTask, onDeleteTask, myReport = null, propertyComposition = [], located = [] }: { 
   navigate: (p: Page) => void; 
   tasks: any[]; 
   followups: FollowUp[]; 
@@ -94,8 +94,9 @@ function ConsultantDashboard({ navigate, tasks, followups, userName, consultantI
   onDeleteTask?: (id: string) => Promise<void>;
   myReport?: { kpis?: Record<string, any>; charts?: Record<string, any> } | null;
   propertyComposition?: Array<{ name: string; value: number; count: number; percentage: number }>;
-  /** All properties visible to the dashboard (scoped per role); the map section keeps only this consultant's located ones. */
-  properties?: Property[];
+  /** Phase 1: located properties from the analytics bundle (role-scoped:
+      own + shared); the map section keeps only this consultant's located ones. */
+  located?: Property[];
 }) {
   const [selectedTask, setSelectedTask] = useState<any | null>(null);
   const myTasks = tasks
@@ -121,10 +122,11 @@ function ConsultantDashboard({ navigate, tasks, followups, userName, consultantI
   }));
   // «نقشه توزیع املاک»: only this consultant's located properties, marker
   // colour driven by property status (the same palette as the consultant
-  // detail map).
+  // detail map). Phase 1: the rows arrive from the analytics bundle
+  // (one role-scoped server query) instead of the removed 1000-row fetch.
   const myLocated = useMemo<DistributionPoint[]>(
     () =>
-      (properties || [])
+      (located || [])
         .filter((p) => String((p as any).consultantId ?? (p as any).consultant ?? "") === String(consultantId))
         .filter((p) => p.latitude != null && p.longitude != null)
         .map((p) => ({
@@ -137,7 +139,7 @@ function ConsultantDashboard({ navigate, tasks, followups, userName, consultantI
           consultantId: ((p as any).consultantId ?? null) as string | number | null,
           consultantName: ((p as any).consultantName as string) || userName,
         })),
-    [properties, consultantId, userName]
+    [located, consultantId, userName]
   );
 
   const statusLegend = useMemo(() => {

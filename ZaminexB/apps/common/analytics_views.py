@@ -710,6 +710,53 @@ def _hot_property_rows(properties: list[dict]) -> list[dict]:
     return out
 
 
+def _located_property_rows(user, is_admin: bool) -> list[dict]:
+    """Every property with stored coordinates, role-scoped like the list API.
+
+    One query (properties ⋈ users) feeding the dashboard distribution maps:
+    admins see the whole system, consultants see own + shared — exactly the
+    scope the maps used to get from the 1000-row fetch. Rows carry only what
+    the maps render (marker position, label, colour inputs).
+    """
+    qs = Property.objects.filter(latitude__isnull=False, longitude__isnull=False)
+    if not is_admin:
+        qs = qs.filter(Q(consultant=user) | Q(is_shared=True))
+    rows = (
+        qs.values(
+            "id",
+            "title",
+            "latitude",
+            "longitude",
+            "status",
+            "area",
+            "consultant_id",
+            "consultant__first_name",
+            "consultant__last_name",
+            "consultant__username",
+        )
+        .order_by("-created_at")
+    )
+    out = []
+    for row in rows:
+        name = None
+        if row["consultant_id"]:
+            full = f"{row['consultant__first_name'] or ''} {row['consultant__last_name'] or ''}".strip()
+            name = full or row["consultant__username"]
+        out.append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "latitude": row["latitude"],
+                "longitude": row["longitude"],
+                "propertyStatus": (row["status"] or "").lower(),
+                "area": row["area"],
+                "consultantId": row["consultant_id"],
+                "consultantName": name or "نامشخص",
+            }
+        )
+    return out
+
+
 class AnalyticsDashboardView(APIView):
     """Compact bundle for reports / admin dashboard widgets."""
 
@@ -776,6 +823,13 @@ class AnalyticsDashboardView(APIView):
                 "revenueMonthly": revenue_bundle["months"],
                 "revenueDealTypes": revenue_bundle["dealTypes"],
                 "propertyComposition": _get_property_composition(composition_qs),
+                # Phase 1: the distribution maps' data source. The dashboards
+                # used to read these rows out of a page_size=1000 property
+                # fetch (silently truncated above 1000 rows); one role-scoped
+                # query here replaces it. Shape matches the slim list rows
+                # (propertyStatus/consultantId/consultantName) so the map
+                # components need no change.
+                "locatedProperties": _located_property_rows(user, is_admin),
                 "myReport": my_report,
             }
         )

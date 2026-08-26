@@ -313,6 +313,132 @@ class AnalyticsAPITests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertIn("contentRichnessScore", res.json())
 
+    # -- Phase 1: the analytics bundle as the dashboard's single source ----
+
+    def test_dashboard_kpis_are_exact_not_row_count_limited(self):
+        """activeListings must be a real COUNT, not "rows fetched so far".
+
+        The dashboards used to recount KPIs over at most 1000 fetched rows
+        (silently wrong beyond that). The analytics bundle reports exact
+        role-scoped counts instead.
+        """
+        # A draft listing must not count as active; a second agent's active
+        # listing must not leak into the consultant's count.
+        Listing.objects.create(
+            property=self.prop,
+            title="Draft listing",
+            publish_channel=Listing.PublishChannel.WEBSITE,
+            created_by=self.agent,
+            assigned_to=self.agent,
+            status=Listing.Status.DRAFT,
+        )
+        other_agent = User.objects.create_user(
+            username="agent_metrics_2", password="pass12345", role=UserRole.AGENT
+        )
+        Listing.objects.create(
+            property=self.prop,
+            title="Other agent listing",
+            publish_channel=Listing.PublishChannel.WEBSITE,
+            created_by=other_agent,
+            assigned_to=other_agent,
+        )
+
+        self.client.force_authenticate(user=self.admin)
+        data = self.client.get("/common/api/analytics/dashboard/").json()
+        # The pre-existing setUp listing (ACTIVE) + the other agent's one;
+        # the draft does not count.
+        self.assertEqual(data["kpis"]["activeListings"], 2)
+
+        self.client.force_authenticate(user=self.agent)
+        data = self.client.get("/common/api/analytics/dashboard/").json()
+        # Role-scoped: only this consultant's own active listings.
+        self.assertEqual(data["kpis"]["activeListings"], 1)
+        self.assertEqual(data["kpis"]["totalProperties"], 1)
+
+    def test_dashboard_located_properties_shape_and_scope(self):
+        """locatedProperties feeds the distribution maps with one scoped query.
+
+        It must carry exactly what the maps render, include only properties
+        with stored coordinates, and follow the list API's role scope
+        (admins: everything, consultants: own + shared).
+        """
+        located_mine = Property.objects.create(
+            title="Located mine",
+            internal_code="ZF_7001",
+            consultant=self.agent,
+            area=80,
+            address="A",
+            latitude=35.7,
+            longitude=51.4,
+        )
+        located_shared = Property.objects.create(
+            title="Located shared",
+            internal_code="ZF_7002",
+            consultant=self.agent,
+            area=90,
+            address="B",
+            latitude=35.8,
+            longitude=51.5,
+            is_shared=True,
+        )
+        other_agent = User.objects.create_user(
+            username="agent_metrics_3", password="pass12345", role=UserRole.AGENT
+        )
+        located_other = Property.objects.create(
+            title="Located other",
+            internal_code="ZF_7003",
+            consultant=other_agent,
+            area=70,
+            address="C",
+            latitude=35.9,
+            longitude=51.6,
+        )
+        # No coordinates → excluded.
+        Property.objects.create(
+            title="Not located",
+            internal_code="ZF_7004",
+            consultant=self.agent,
+            area=60,
+            address="D",
+        )
+
+        self.client.force_authenticate(user=self.admin)
+        data = self.client.get("/common/api/analytics/dashboard/").json()
+        rows = data["locatedProperties"]
+        self.assertEqual(
+            sorted(r["id"] for r in rows),
+            sorted([located_mine.id, located_shared.id, located_other.id]),
+        )
+        row = next(r for r in rows if r["id"] == located_mine.id)
+        self.assertEqual(
+            set(row.keys()),
+            {
+                "id",
+                "title",
+                "latitude",
+                "longitude",
+                "propertyStatus",
+                "area",
+                "consultantId",
+                "consultantName",
+            },
+        )
+        self.assertEqual(row["title"], "Located mine")
+        self.assertEqual(row["consultantId"], self.agent.id)
+        # The user row carries no first/last name, so the serializer's
+        # username fallback applies — the point is the field is populated.
+        self.assertEqual(row["consultantName"], "agent_metrics")
+
+        self.client.force_authenticate(user=self.agent)
+        rows = self.client.get("/common/api/analytics/dashboard/").json()[
+            "locatedProperties"
+        ]
+        # Own + shared — the other agent's located property is out of scope.
+        self.assertEqual(
+            sorted(r["id"] for r in rows),
+            sorted([located_mine.id, located_shared.id]),
+        )
+
 
 class ConsultantRankingMetricsTests(TestCase):
     def setUp(self):

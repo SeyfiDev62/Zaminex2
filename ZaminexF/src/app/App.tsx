@@ -124,7 +124,9 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
   // All properties across the whole system, used only by the consultant
   // "همه املاک" tab (fetched via scope=all). Kept separate from `properties`,
   // which stays scoped to the current consultant (own + shared) everywhere else.
-  const [allProperties, setAllProperties] = useState<Property[]>([]);
+  // Phase 1: the dashboards' distribution maps read located properties from
+  // the analytics bundle (locatedProperties) instead of a 1000-row fetch.
+  const [locatedProperties, setLocatedProperties] = useState<Property[]>([]);
   const [selectedPropertyId, setSelectedPropertyId] = useState<string | null>(null);
   const [selectedProperty, setSelectedProperty] = useState<Property | undefined>(
     initialData.pageProps?.property
@@ -135,9 +137,10 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
   const [editingPropertyId, setEditingPropertyId] = useState<string | null>(null);
 
   // ── Listings state ───────────────────────────────────────────────────
+  // Phase 1: no bulk fetch anymore — the listings list tabs paginate on the
+  // server (ListingsPage). This state only mirrors create/update/action
+  // responses so in-app navigation stays consistent.
   const [listings, setListings] = useState<Listing[]>([]);
-  const [listingsLoading, setListingsLoading] = useState(false);
-  const [listingsError, setListingsError] = useState<string | null>(null);
   const [selectedListingId, setSelectedListingId] = useState<string | null>(null);
   const [selectedListing, setSelectedListing] = useState<Listing | undefined>(undefined);
   const [listingFormSubmitting, setListingFormSubmitting] = useState(false);
@@ -367,27 +370,13 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     }
   }, [isAuthenticated, fetchNotifications, fetchTicketUnreadCount]);
 
-  // ── Listings API integration ────────────────────────────────────────
-  const fetchListings = useCallback(async () => {
-    setListingsLoading(true);
-    setListingsError(null);
-    try {
-      const res = await apiFetch("/listings/api/listings/?page_size=1000", { method: "GET" }, initialData.csrfToken);
-      if (!res.ok) throw new Error("خطا در دریافت لیست آگهی‌ها!");
-      const data = await res.json();
-      const items = Array.isArray(data) ? data : (data.results ?? []);
-      setListings(items);
-    } catch (error: any) {
-      setListingsError(error.message || "خطا در بارگذاری");
-    } finally {
-      setListingsLoading(false);
-    }
-  }, [initialData.csrfToken]);
-
-  useEffect(() => {
-    if (page !== "listings" && page !== "my-listings") return;
-    fetchListings();
-  }, [page, fetchListings]);
+  // ── Listings state ───────────────────────────────────────────────────
+  // Phase 1: the listings list tabs paginate on the server themselves
+  // (ListingsPage), so there is no bulk 1000-row fetch here anymore. The
+  // `listings` state only mirrors create/update/action responses so in-app
+  // navigation stays consistent; it is re-filled by the list page itself.
+  const listingsLoading = false;
+  const listingsError: string | null = null;
 
   useEffect(() => {
     if (page !== "listing-detail" || !selectedListingId) return;
@@ -458,9 +447,16 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
 
   const refreshDashboard = useCallback(async () => {
     try {
-      const [props, lres, fres, cres, tres, dashRes, actRes] = await Promise.allSettled([
-        apiFetch("/properties/api/properties/?page_size=1000", { method: "GET" }, initialData.csrfToken),
-        apiFetch("/listings/api/listings/?page_size=1000", { method: "GET" }, initialData.csrfToken),
+      // Phase 1: the analytics bundle is the dashboard's single source —
+      // exact role-scoped KPIs, charts, hot properties and the maps' located
+      // properties. The old 1000-row property/listing fetches are gone: the
+      // KPIs were re-counted client-side over at most 1000 rows (silently
+      // wrong beyond that) and the maps read coordinates out of the bulk
+      // fetch. The follow-ups rows are still fetched whole because the
+      // «پیگیری‌های پیش‌رو» widget needs its exact overdue-then-recent
+      // ordering (small table; LargeListPagination opt-in); the consultants
+      // directory and the tasks summary are unchanged.
+      const [fres, cres, tres, dashRes, actRes] = await Promise.allSettled([
         apiFetch("/followupa/api/followups/", { method: "GET" }, initialData.csrfToken),
         apiFetch("/accounts/consultants/", { method: "GET" }, initialData.csrfToken),
         apiFetch("/tasks/api/tasks/summary/", { method: "GET" }, initialData.csrfToken),
@@ -468,49 +464,21 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
         apiFetch("/common/api/activity-log/?page_size=6&days=30", { method: "GET" }, initialData.csrfToken),
       ]);
 
-      let totalProps = 0;
-      let activeListings = 0;
-      let openTasks = 0;
-      let followUpsDue = 0;
-      let consultantCount = 0;
-      let activeConsultantCount = 0;
-
-      if (props.status === "fulfilled" && props.value.ok) {
-        const data = await props.value.json();
-        const items = Array.isArray(data) ? data : (data.results ?? []);
-        // Use count if paginated, otherwise length
-        totalProps = Array.isArray(data) ? data.length : (data.count ?? items.length);
-        setProperties(items);
-      }
-
-      if (lres.status === "fulfilled" && lres.value.ok) {
-        const data = await lres.value.json();
-        const items = Array.isArray(data) ? data : (data.results ?? []);
-        // For active listings, if paginated, count may need separate logic, but use filtered length of fetched page + total count awareness
-        activeListings = items.filter((l: any) => l.status === "ACTIVE").length;
-        // If API returns count, and we fetched with large page_size, active count from items is okay for dashboard; for precise total active, backend could provide filtered count, but we keep simple
-        setListings(items);
-      }
-
       if (fres.status === "fulfilled" && fres.value.ok) {
         const data = await fres.value.json();
         const items = Array.isArray(data) ? data : (data.results ?? []);
-        followUpsDue = items.filter((f: any) => f.status === "scheduled").length;
         setFollowups(items);
       }
 
       if (cres.status === "fulfilled" && cres.value.ok) {
         const data = await cres.value.json();
         const items = Array.isArray(data) ? data : (data.results ?? []);
-        consultantCount = items.length;
-        activeConsultantCount = items.filter((c: any) => c.is_active).length;
         setConsultants(items);
       }
 
       if (tres.status === "fulfilled" && tres.value.ok) {
         const data = await tres.value.json();
         setTaskSummary(data);
-        openTasks = (data?.pending || 0) + (data?.in_progress || 0);
       }
 
       if (dashRes.status === "fulfilled" && dashRes.value.ok) {
@@ -521,13 +489,19 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
         setPropertyComposition(dash.propertyComposition || []);
         setHotProperties(dash.hotProperties || []);
         setMyReport(dash.myReport || null);
+        setLocatedProperties(dash.locatedProperties || []);
+        // Exact server-side counts (single source of truth). On failure we
+        // keep the last known values — the removed client-side recount could
+        // only report a truncated, at-best-1000-row estimate anyway.
         if (dash.kpis) {
-          totalProps = dash.kpis.totalProperties ?? totalProps;
-          activeListings = dash.kpis.activeListings ?? activeListings;
-          openTasks = dash.kpis.openTasks ?? openTasks;
-          followUpsDue = dash.kpis.followUpsDue ?? followUpsDue;
-          consultantCount = dash.kpis.consultants ?? consultantCount;
-          activeConsultantCount = dash.kpis.consultantsActive ?? activeConsultantCount;
+          setDashboardKpis({
+            totalProperties: dash.kpis.totalProperties ?? 0,
+            activeListings: dash.kpis.activeListings ?? 0,
+            openTasks: dash.kpis.openTasks ?? 0,
+            followUpsDue: dash.kpis.followUpsDue ?? 0,
+            consultants: dash.kpis.consultants ?? 0,
+            consultantsActive: dash.kpis.consultantsActive ?? 0,
+          });
         }
       }
 
@@ -535,15 +509,6 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
         const actData = await actRes.value.json();
         setRecentActivities(actData.results || []);
       }
-
-      setDashboardKpis({
-        totalProperties: totalProps,
-        activeListings,
-        openTasks,
-        followUpsDue,
-        consultants: consultantCount,
-        consultantsActive: activeConsultantCount,
-      });
     } catch (err) {
       console.error("Failed to refresh dashboard:", err);
     }
@@ -940,14 +905,33 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     setPropertiesLoading(true);
     setPropertiesError(null);
     try {
-      // Use large page_size to get all for dashboard/KPIs; pagination-enabled endpoint returns count.
-      // no-store: a cached copy would resurface rows that were just deleted.
-      const res = await apiFetch("/properties/api/properties/?page_size=1000", { method: "GET", cache: "no-store" }, initialData.csrfToken);
-      if (!res.ok) throw new Error("خطا در دریافت لیست املاک");
-      const data = await res.json();
-      const items = Array.isArray(data) ? data : (data.results ?? []);
-      setProperties(items);
-      return items;
+      // The property list caps page_size at 100 (Phase 1 guard), so the
+      // comboboxes' "every visible property" data is paged through in
+      // 100-row steps. no-store: a cached copy would resurface rows that
+      // were just deleted.
+      const all: Property[] = [];
+      let page = 1;
+      let total = Infinity;
+      while (all.length < total) {
+        const res = await apiFetch(
+          `/properties/api/properties/?page=${page}&page_size=100`,
+          { method: "GET", cache: "no-store" },
+          initialData.csrfToken
+        );
+        if (!res.ok) throw new Error("خطا در دریافت لیست املاک");
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          all.push(...data);
+          break;
+        }
+        const items = data.results ?? [];
+        total = data.count ?? items.length;
+        all.push(...items);
+        if (items.length < 100) break;
+        page += 1;
+      }
+      setProperties(all);
+      return all;
     } catch (error: any) {
       setPropertiesError(error.message || "خطا در بارگذاری");
       return [];
@@ -956,32 +940,13 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     }
   }, [initialData.csrfToken]);
 
+  // The list tabs (properties / my-properties / all-properties) paginate on
+  // the server themselves; this fetch serves the pages that still need the
+  // full visible list for comboboxes (wizards, follow-ups, filters).
   useEffect(() => {
-    if (page !== "properties" && page !== "my-properties" && page !== "add-property" && page !== "edit-property" && page !== "create-followup" && page !== "edit-followup" && page !== "follow-ups") return;
+    if (page !== "add-property" && page !== "edit-property" && page !== "create-followup" && page !== "edit-followup" && page !== "follow-ups") return;
     fetchProperties();
   }, [page, fetchProperties]);
-
-  // The consultant "همه املاک" tab needs every property in the system, which
-  // the scoped `properties` fetch never returns. Load it only when that tab is
-  // open so consultants keep a fast, role-scoped list everywhere else.
-  const fetchAllProperties = useCallback(async () => {
-    try {
-      const res = await apiFetch(
-        "/properties/api/properties/?scope=all&page_size=1000",
-        { method: "GET", cache: "no-store" },
-        initialData.csrfToken
-      );
-      if (!res.ok) return;
-      const data = await res.json();
-      setAllProperties(Array.isArray(data) ? data : (data.results ?? []));
-    } catch (error) {
-      console.error("Error fetching all properties:", error);
-    }
-  }, [initialData.csrfToken]);
-
-  useEffect(() => {
-    if (page === "all-properties") fetchAllProperties();
-  }, [page, fetchAllProperties]);
 
   useEffect(() => {
     const wantedId = page === "edit-property"
@@ -1198,11 +1163,11 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
       const res = await apiFetch(`/properties/api/properties/${id}/`, { method: "DELETE" }, initialData.csrfToken);
       if (!res.ok) throw new Error("خطا در حذف ملک");
       toast({ type: "success", message: "ملک حذف شد." });
-      // Drop the row from every in-memory list immediately so the UI updates
-      // in the same tick — the refetch below only re-syncs (and may be served
-      // from a stale cache, so it must not be what the user waits for).
+      // Drop the row from the in-memory combobox list immediately so the UI
+      // updates in the same tick — the refetch below only re-syncs (and may
+      // be served from a stale cache, so it must not be what the user waits
+      // for). The list tabs re-fetch from the server on navigation.
       setProperties((prev) => prev.filter((p) => String(p.id) !== String(id)));
-      setAllProperties((prev) => prev.filter((p) => String(p.id) !== String(id)));
       await fetchProperties();
       setPage("properties");
     } catch (err: any) {
@@ -1478,7 +1443,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
   const renderPage = () => {
     switch (page) {
       case "admin-dashboard":
-        return <AdminDashboard kpis={dashboardKpis} navigate={navigate} onRefresh={refreshDashboard} topConsultants={topConsultants} recentActivities={recentActivities} tasks={tasks} upcomingFollowups={upcomingFollowups} revenueMonthly={revenueMonthly} revenueDealTypes={revenueDealTypes} propertyComposition={propertyComposition} hotProperties={hotProperties} properties={properties} onSaveTask={saveTask} onDeleteTask={deleteTask} />;
+        return <AdminDashboard kpis={dashboardKpis} navigate={navigate} onRefresh={refreshDashboard} topConsultants={topConsultants} recentActivities={recentActivities} tasks={tasks} upcomingFollowups={upcomingFollowups} revenueMonthly={revenueMonthly} revenueDealTypes={revenueDealTypes} propertyComposition={propertyComposition} hotProperties={hotProperties} located={locatedProperties} onSaveTask={saveTask} onDeleteTask={deleteTask} />;
       case "properties":
         return (
           <PropertiesPage
@@ -1806,11 +1771,14 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
               onDeleteTask={deleteTask}
               myReport={myReport}
               propertyComposition={propertyComposition}
-              properties={properties}
+              located={locatedProperties}
               kpis={{
-              properties: properties.filter(p => String(p.consultantId ?? p.consultant ?? "") === String(currentConsultantId)).length,
-              listings: listings.filter(l => l.status === "ACTIVE" && (String(l.assigned_to) === String(currentConsultantId) || String((l as any).created_by) === String(currentConsultantId))).length,
-              openTasks: tasks.filter(t => String(t.assigneeId) === String(currentConsultantId) && t.status !== "COMPLETED" && t.status !== "CANCELLED").length,
+              // Exact role-scoped counts from the analytics bundle (Phase 1):
+              // the consultant scope is own + shared properties and own
+              // active listings — the same scope the list tabs show.
+              properties: dashboardKpis.totalProperties,
+              listings: dashboardKpis.activeListings,
+              openTasks: dashboardKpis.openTasks,
             }}
           />
         );
@@ -1818,7 +1786,6 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
         return (
           <MyPropertiesPage
             navigate={navigate}
-            properties={properties}
             consultants={consultants}
             consultantId={currentConsultantId}
             openPropertyDetail={openPropertyDetail}
@@ -1832,7 +1799,6 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
         return (
           <AllPropertiesPage
             navigate={navigate}
-            properties={allProperties}
             consultants={consultants}
             consultantId={currentConsultantId}
             openPropertyDetail={openPropertyDetail}

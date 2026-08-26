@@ -138,3 +138,36 @@ independent of page size. Guarded by
 `PropertyListQueryCountTests` / `ListingListQueryCountTests` (query-count
 flatness) and the shape tests in `apps/properties/test_list_serializer.py` /
 `apps/listings/tests.py`.
+
+## Phase 1 completion — spec gap closure
+
+The Phase-1 spec has four items; three were delivered in the first commit,
+one was under-delivered. This section documents the gap closure (report:
+`benchmarks/reports/benchmark-phase1-complete.json`):
+
+| spec item | status |
+|---|---|
+| slim list/detail serializers | ✅ + `imagesCount` now included (spec: "imagesCount + first thumbnail instead of the gallery"); query-free (prefetched gallery) |
+| server-side pagination, lists | ✅ (first commit) |
+| dashboard single-source, no `page_size=1000` fetches | ✅ closed: `refreshDashboard` no longer fetches the 1000-row property/listing lists; the analytics bundle is the single source (exact role-scoped KPIs already existed; **`locatedProperties` added** — the distribution maps' rows, one role-scoped query ≈9 ms at 1000 rows); the `listings` bulk fetch and the `scope=all&page_size=1000` tab fetch are gone (the tabs self-fetch) |
+| `max_page_size` 1000 → 100 | ✅ closed: `StandardResultsSetPagination.max_page_size = 100`; a legacy `page_size=1000` request now answers 200 with ≤100 rows + the true `count` (measured below). `LargeListPagination` (1000) remains a deliberate opt-in used only by the small-table follow-ups endpoint; the combobox/map "every row" consumers page through in 100-row steps |
+
+### Before → after (same machine, 1000 seeded properties / 2000 listings)
+
+| path | p50 ms | notes |
+|---|---:|---|
+| properties-list-p1000 (**guard check**) | 434.7 → **57.5** | now clamped to 100 rows (102 KB) — measures the guard, not a 1000-row payload |
+| listings-list-p1000 (**guard check**) | 367.6 → **61.2** | same: clamped to 100 rows (77 KB), 12 queries |
+| properties-list-all-100loop (**new**) | **706.2** | the new "every visible property" pattern (10 × 100-row requests, 1032 KB, 110 queries) — replaces the bulk fetch for comboboxes/maps |
+| properties-list-page1-p20 | 24.5 → 26.2 | flat |
+| properties-search-p20 | 55.9 → 51.1 | flat |
+| properties-detail | 35.2 → 30.3 | flat |
+| listings-list-page1-p20 | 42.1 → 41.3 | flat |
+| listings-search-p20 | 81.6 → 93.5 | trgm run-to-run variance |
+| dashboard-analytics (Phase 4 target) | 13667.9 → ~14300–14900 | heavy 9000-query path, high variance in this container; single-shot measurement with the new code: 13676 ms — the `locatedProperties` addition costs ≈9 ms (measured separately). Payload 4 → 215 KB: the maps' rows moved into the bundle (total dashboard transfer dropped from ≈2.5 MB of bulk lists to ≈250 KB) |
+| property-report | 46.5 → 45.7 | flat |
+
+New tests: the 100-row clamp (`PropertyListPageSizeGuardTests`), exact
+role-scoped `activeListings` (`test_dashboard_kpis_are_exact_not_row_count_limited`),
+`locatedProperties` shape + scope (`test_dashboard_located_properties_shape_and_scope`),
+`imagesCount` in the slim list.

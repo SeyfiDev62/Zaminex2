@@ -39,6 +39,7 @@ function AdminDashboard({
   revenueDealTypes = [],
   propertyComposition = [],
   hotProperties = [],
+  located = [],
   properties = [],
   onSaveTask,
   onDeleteTask,
@@ -54,6 +55,11 @@ function AdminDashboard({
   revenueDealTypes?: Array<{ name: string; label: string }>;
   propertyComposition?: Array<{ name: string; value: number; count: number; percentage: number }>;
   hotProperties?: Array<{ id?: number; title?: string; neighborhood?: string; engagementHeatScore?: number; daysOnMarket?: number | null }>;
+  /** Phase 1: the maps' data source — role-scoped located properties from the
+      analytics bundle (replaces the old 1000-row fetch). */
+  located?: Property[];
+  /** Legacy: full property rows for the composition fallback — no longer
+      passed (the analytics bundle always provides the composition). */
   properties?: Property[];
   onSaveTask?: (id: string, patch: Record<string, any>) => Promise<void>;
   onDeleteTask?: (id: string) => Promise<void>;
@@ -111,9 +117,11 @@ function AdminDashboard({
   // Located properties for the «نقشه توزیع املاک» section: every property
   // with stored coordinates, marker colour driven by the assigned consultant
   // (the stable non-repeating palette — a new consultant gets a fresh colour).
+  // Phase 1: the rows arrive from the analytics bundle (one role-scoped
+  // server query) instead of the removed 1000-row fetch.
   const locatedProperties = useMemo<DistributionPoint[]>(
     () =>
-      (properties || [])
+      (located || [])
         .filter((p) => p.latitude != null && p.longitude != null)
         .map((p) => ({
           id: p.id,
@@ -125,7 +133,7 @@ function AdminDashboard({
           consultantId: ((p as any).consultantId ?? null) as string | number | null,
           consultantName: ((p as any).consultantName as string) || "نامشخص",
         })),
-    [properties]
+    [located]
   );
 
   // Legend rows: one per consultant present on the map, in the same stable

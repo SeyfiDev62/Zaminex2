@@ -68,7 +68,9 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
     const fetchPropertyListings = async () => {
       setListingsLoading(true);
       try {
-        const pageSize = 1000;
+        // Phase 1: the list caps page_size at 100; a single property has
+        // few listings, so the loop below finishes in one or two requests.
+        const pageSize = 100;
         const collected: Listing[] = [];
         let page = 1;
         let total = Infinity;

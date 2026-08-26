@@ -96,7 +96,8 @@ class PropertyListSerializerShapeTests(TestCase):
             r for r in res.json()["results"] if r["id"] == self.prop_with_image.id
         )
 
-        # Detail-only payload is gone from the list.
+        # Detail-only payload is gone from the list. (imagesCount is
+        # deliberately kept — it replaces the gallery array, see below.)
         for field in (
             "description",
             "images",
@@ -104,7 +105,6 @@ class PropertyListSerializerShapeTests(TestCase):
             "attributes",
             "attributeDetails",
             "pricePerSqm",
-            "imagesCount",
             "daysOnMarket",
             "spatialDensityRatio",
             "priceDeviationIndex",
@@ -136,8 +136,17 @@ class PropertyListSerializerShapeTests(TestCase):
             "ownerLastName",
             "ownerPhone",
             "imageUrl",
+            # "imagesCount + first thumbnail" replaces the full gallery
+            # (Phase 1 spec) — a plain count, no per-row query.
+            "imagesCount",
         ):
             self.assertIn(field, row)
+
+    def test_images_count_is_a_plain_gallery_count(self):
+        res = self.client.get("/properties/api/properties/", {"page_size": 10})
+        rows = {r["id"]: r for r in res.json()["results"]}
+        self.assertEqual(rows[self.prop_with_image.id]["imagesCount"], 1)
+        self.assertEqual(rows[self.prop_no_image.id]["imagesCount"], 0)
 
     def test_image_url_is_the_first_gallery_image(self):
         res = self.client.get("/properties/api/properties/", {"page_size": 10})
@@ -353,3 +362,55 @@ class PropertyListConsultantScopeAllFilterTests(TestCase):
         self.assertEqual(res.status_code, 200)
         rows = res.json()["results"]
         self.assertEqual([r["id"] for r in rows], [self.prop_a.id])
+
+
+class PropertyListPageSizeGuardTests(TestCase):
+    """Phase 1 guard: ``max_page_size`` is capped at 100.
+
+    A legacy or accidental ``page_size=1000`` request must no longer be able
+    to drag a thousand serialized rows through one response — the server
+    answers 200 with at most 100 rows and the true ``count``.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from apps.listings.models import Listing
+
+        agent = User.objects.create_user(
+            username="guard-agent", password="pw", role="AGENT"
+        )
+        # 120 rows — enough to exceed the cap twice over. bulk_create keeps
+        # the test fast (signals are deliberately skipped).
+        Property.objects.bulk_create(
+            [
+                Property(
+                    title=f"ملک گارد {i}",
+                    internal_code=f"ZF_8{i:03d}",
+                    consultant=agent,
+                    property_type="APARTMENT",
+                    deal_type="SALE",
+                    area=90,
+                    address=f"آدرس {i}",
+                )
+                for i in range(120)
+            ]
+        )
+
+    def test_page_size_is_clamped_to_100(self):
+        client = APIClient()
+        admin = User.objects.create_user(
+            username="guard-admin", password="pw", role="ADMIN"
+        )
+        client.force_authenticate(user=admin)
+
+        res = client.get("/properties/api/properties/", {"page_size": 1000})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(len(data["results"]), 100)
+        self.assertEqual(data["count"], 120)
+
+        # The next page reaches the remaining rows — nothing is lost.
+        res = client.get(
+            "/properties/api/properties/", {"page_size": 100, "page": 2}
+        )
+        self.assertEqual(len(res.json()["results"]), 20)
