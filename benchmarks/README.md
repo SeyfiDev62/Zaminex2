@@ -171,3 +171,30 @@ New tests: the 100-row clamp (`PropertyListPageSizeGuardTests`), exact
 role-scoped `activeListings` (`test_dashboard_kpis_are_exact_not_row_count_limited`),
 `locatedProperties` shape + scope (`test_dashboard_located_properties_shape_and_scope`),
 `imagesCount` in the slim list.
+
+## Phase 2 results — Redis infrastructure (fail-open)
+
+Phase 2 is **infrastructure only**: no consumer is wired to the cache yet, so
+every benchmark path is expected to be flat (report:
+`benchmarks/reports/benchmark-phase2.json`) — and is (flat-to-faster, same
+machine). The value of the phase is the safe foundation:
+
+- `CACHES` (settings): `REDIS_URL` set → django-redis; absent → LocMem.
+  `IGNORE_EXCEPTIONS: True` + 0.5 s socket timeouts → **fail-open** (a dead
+  Redis is a cache miss, never a 500).
+- `apps/common/cache_utils.py`: versioned keys (`zaminex:v1:<domain>:…` + a
+  single `CACHE_VERSION`), JSON payloads with exact `Decimal` round-trip and
+  `None`/Persian-text fidelity, fail-open `cache_get/set/delete`, and
+  `cache_or_compute` with a per-key `SET NX EX` lock (thundering-herd
+  protection) that fails fast when the lock state is unknown.
+- `docker-compose.yml` (optional `redis:7`) + README section 10.
+- Verified against a **live Redis 6.0.9**: set/get round-trip, cross-process
+  visibility, `cache_or_compute` single-compute, and the roadmap acceptance
+  test — kill Redis mid-run → the request still returns 200.
+- DRF throttle counters confirmed to land in Redis (the Phase 3
+  cross-worker rate-limit win needs no code change).
+
+Tested by `apps/common/tests/test_cache_utils.py` (18 tests): key
+versioning, JSON/Decimal round-trip, corrupt/foreign payload → miss,
+fail-open helpers, dead-Redis → 200 request (real django-redis client against
+a closed port), lock wait/timeout/disabled, and the CACHES builder.

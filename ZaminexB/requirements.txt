@@ -39,3 +39,10 @@ python-bidi==0.6.11
 # Uses PostgreSQL pg_trgm (TrigramSimilarity) and Django postgres search
 # for native, field-by-field fuzzy matching with Persian normalization.
 
+# --- Cache (Phase 2) -------------------------------------------------------
+# Redis-backed cache when REDIS_URL is set; the app falls back to in-process
+# LocMem without it (Redis is an optimisation, never a dependency —
+# IGNORE_EXCEPTIONS makes a dead Redis a cache miss, not a 500).
+django-redis==7.0.0
+redis==8.1.0
+

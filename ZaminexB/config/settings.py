@@ -252,6 +252,50 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = True
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
+
+# ---------------------------------------------------------------------------
+#  Cache (Phase 2)
+#
+#  Redis is an optimisation, never a dependency (roadmap principles):
+#  * ``REDIS_URL`` set  → django-redis is the default cache backend;
+#  * ``REDIS_URL`` absent → in-process LocMem — the project's "local with no
+#    dependencies" philosophy is preserved for plain checkouts;
+#  * ``IGNORE_EXCEPTIONS: True`` (fail-open): a dead or slow Redis degrades
+#    to a cache miss, never to a 500. The short socket timeouts cap how long
+#    a hanging Redis can stall a request.
+#
+#  Everything that reads this cache (DRF's throttle counters, and the Phase
+#  3+ cache consumers) inherits the fail-open behaviour — no consumer code
+#  has to handle cache errors.
+# ---------------------------------------------------------------------------
+def _cache_settings():
+    redis_url = os.environ.get("REDIS_URL", "").strip()
+    if redis_url:
+        return {
+            "default": {
+                "BACKEND": "django_redis.cache.RedisCache",
+                "LOCATION": redis_url,
+                "OPTIONS": {
+                    "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                    # Fail-open: swallow backend errors as misses.
+                    "IGNORE_EXCEPTIONS": True,
+                    # A hung Redis must not stall requests: bound the connect
+                    # and read windows tightly.
+                    "SOCKET_CONNECT_TIMEOUT": 0.5,
+                    "SOCKET_TIMEOUT": 0.5,
+                },
+            }
+        }
+    return {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "zaminex-default",
+        }
+    }
+
+
+CACHES = _cache_settings()
+
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "apps.common.exceptions.persian_exception_handler",
     "DEFAULT_PERMISSION_CLASSES": [

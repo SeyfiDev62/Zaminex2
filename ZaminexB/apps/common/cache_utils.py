@@ -1,0 +1,211 @@
+"""Versioned, fail-open cache helpers (Phase 2).
+
+Roadmap principles implemented here:
+
+* **Fail-open** — every function in this module swallows cache errors. A
+  dead or slow backend degrades to a cache miss, never to a 500 (the
+  ``CACHES`` configuration's ``IGNORE_EXCEPTIONS`` is the second line of
+  defence; this module guards the decode/encode paths too).
+* **Versioned keys** — every key is ``zaminex:<CACHE_VERSION>:<domain>:...``.
+  When a cached payload's shape changes, bump ``CACHE_VERSION``: readers then
+  miss on the old-version keys (which expire naturally) instead of
+  deserialising stale data — a targeted invalidation without flushing the
+  whole cache.
+* **JSON payloads** — values are stored as UTF-8 JSON text (inspectable in
+  ``redis-cli``), with a Decimal-safe codec so money values round-trip
+  exactly (no float drift) and ``None`` survives as ``null``.
+* **Thundering-herd protection** — :func:`cache_or_compute` serialises
+  recomputation of a hot key with a per-key ``SET NX EX`` lock: one caller
+  computes while the others briefly wait and re-read the cache.
+
+Phase 2 is infrastructure only — no consumer is wired to this module yet
+("zero risk" by construction). Phases 3–5 build on it.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from decimal import Decimal
+from typing import Any, Callable
+
+__all__ = [
+    "CACHE_VERSION",
+    "make_key",
+    "cache_get",
+    "cache_set",
+    "cache_delete",
+    "cache_or_compute",
+]
+
+# Bump when the shape of a cached payload changes: readers then miss on the
+# old-version keys instead of deserialising stale data. One constant covers
+# every domain, so a version bump is a deliberate, global, one-line act.
+CACHE_VERSION = "v1"
+
+# cache_or_compute lock defaults (seconds).
+_LOCK_SUFFIX = ":lock"
+_LOCK_TIMEOUT = 10      # how long the computing worker may hold the lock
+_LOCK_POLL_SECONDS = 0.1  # how often waiters re-read the cache
+_LOCK_MAX_WAIT = 5.0    # give up waiting and compute locally after this
+
+
+class _DecimalJSONEncoder(json.JSONEncoder):
+    """JSON encoder that preserves :class:`~decimal.Decimal` exactly.
+
+    Decimals are stored as tagged strings (``{"__zaminex_decimal__": "…"}``)
+    so ``json`` never rounds them through float — money values survive the
+    round trip bit-for-bit. Any other non-JSON-native type (datetime, UUID,
+    …) falls back to its ``str()`` form rather than failing the store.
+
+    Note: the fallback lives in this class's ``default`` — passing a
+    ``default=`` keyword to ``json.dumps`` would override it and silently
+    turn Decimals into plain strings.
+    """
+
+    def default(self, o: Any) -> Any:
+        if isinstance(o, Decimal):
+            return {"__zaminex_decimal__": str(o)}
+        return str(o)
+
+
+def _decimal_object_hook(values: dict) -> Any:
+    if list(values.keys()) == ["__zaminex_decimal__"]:
+        return Decimal(values["__zaminex_decimal__"])
+    return values
+
+
+def _encode(value: Any) -> str:
+    return json.dumps(value, cls=_DecimalJSONEncoder, ensure_ascii=False)
+
+
+def _decode(raw: Any) -> Any:
+    """Decode a payload written by :func:`cache_set`; anything else is a miss.
+
+    A non-string payload (e.g. a value another subsystem stored through the
+    same backend) or a corrupted JSON document is treated as a miss, never
+    propagated — a cache problem must not become a request problem.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return json.loads(raw, object_hook=_decimal_object_hook)
+    except (ValueError, TypeError):
+        return None
+
+
+def _cache():
+    from django.core.cache import cache
+
+    return cache
+
+
+def make_key(domain: str, *parts: Any) -> str:
+    """Build a versioned key: ``zaminex:v1:<domain>:<part1>:<part2>:...``
+
+    The colon is the key separator, so parts are sanitised (``:``/``/`` →
+    ``_``) and empty parts are dropped. The domain names what is cached
+    (``ai``, ``report``, ``stats``, …) — it is what later invalidation
+    targets.
+    """
+    cleaned: list[str] = []
+    for part in parts:
+        text = str(part).strip().replace(":", "_").replace("/", "_")
+        if text:
+            cleaned.append(text)
+    return ":".join([f"zaminex:{CACHE_VERSION}:{domain}"] + cleaned)
+
+
+def cache_get(key: str) -> Any:
+    """Fail-open read: any backend error (or corrupt payload) is a miss."""
+    try:
+        return _decode(_cache().get(key))
+    except Exception:
+        return None
+
+
+def cache_set(key: str, value: Any, timeout: int | float | None) -> bool:
+    """Fail-open write.
+
+    Returns ``False`` only when the backend raised; ``True`` means no error
+    was observed. (Backends differ in what ``set`` returns on success —
+    LocMem returns ``None``, django-redis ``True`` — and a fail-open backend
+    swallows its own errors, so the return value is "no error", not a
+    delivery guarantee.)
+    """
+    try:
+        _cache().set(key, _encode(value), timeout)
+        return True
+    except Exception:
+        return False
+
+
+def cache_delete(key: str) -> None:
+    """Fail-open delete."""
+    try:
+        _cache().delete(key)
+    except Exception:
+        pass
+
+
+def cache_or_compute(
+    key: str,
+    compute: Callable[[], Any],
+    timeout: int | float | None,
+    *,
+    lock: bool = True,
+) -> Any:
+    """Return the cached value, or compute + store it — herd-safe.
+
+    1. Read the cache (a miss — including a dead backend — just continues).
+    2. Try to take the per-key lock (``SET NX EX`` via ``cache.add``):
+
+       * **won** → compute, store, release;
+       * **lost** → another worker is computing: poll the cache briefly and
+         use the value as soon as it appears (the common case);
+       * **unknown** (``add`` returned nothing — the backend swallowed an
+         error) → fail fast: compute locally without waiting.
+
+    3. If the value never appeared while waiting (the lock holder may have
+    died), compute locally — correctness over the optimisation.
+
+    Notes: a computed ``None`` is stored as ``"null"`` and reads back as a
+    miss, so ``None`` is never effectively cached — callers that must cache
+    an "empty" result should wrap it (e.g. ``{"value": None}``). A raising
+    ``compute`` propagates its exception (it is a business error, not a
+    cache error); the lock expires by itself after ``_LOCK_TIMEOUT``.
+    """
+    value = cache_get(key)
+    if value is not None:
+        return value
+
+    if not lock:
+        value = compute()
+        cache_set(key, value, timeout)
+        return value
+
+    lock_key = key + _LOCK_SUFFIX
+    try:
+        won = _cache().add(lock_key, "1", _LOCK_TIMEOUT)
+    except Exception:
+        won = None  # unknown → fail fast, compute locally
+
+    if won is False:
+        deadline = time.monotonic() + _LOCK_MAX_WAIT
+        while True:
+            time.sleep(_LOCK_POLL_SECONDS)
+            value = cache_get(key)
+            if value is not None:
+                return value
+            if time.monotonic() >= deadline:
+                break  # the holder died → compute locally
+
+    value = compute()
+    cache_set(key, value, timeout)
+    if won:
+        cache_delete(lock_key)
+    return value

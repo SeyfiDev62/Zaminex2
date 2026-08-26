@@ -227,6 +227,31 @@ python manage.py runserver
 
 ---
 
+## 10. Redis (Optional — Caching, Phase 2+)
+
+Redis is an **optimisation, never a dependency**:
+
+- **Without** `REDIS_URL` the app runs on in-process LocMem — nothing extra
+  to install, plain checkouts are unchanged.
+- **With** `REDIS_URL` the default cache backend becomes django-redis. The
+  configuration is fail-open (`IGNORE_EXCEPTIONS`): a dead or slow Redis
+  degrades to a cache miss, never to a 500.
+
+```bash
+# Local Redis (optional):
+docker compose up -d redis
+export REDIS_URL=redis://localhost:6379/0
+python manage.py runserver
+```
+
+What uses the cache: DRF's throttle counters (rate limits become accurate
+across workers as soon as Redis is present) and the cache helpers in
+`apps/common/cache_utils.py` (versioned `zaminex:v1:…` keys, JSON payloads
+with exact `Decimal` round-trips, `cache_or_compute` with a per-key lock for
+thundering-herd protection). See `benchmarks/README.md` for the phase plan.
+
+---
+
 ## Quick Checklist
 
 - [ ] PostgreSQL installed, password `zaminex`, PATH set permanently
