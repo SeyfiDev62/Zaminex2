@@ -26,8 +26,9 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import contextmanager
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 __all__ = [
     "CACHE_VERSION",
@@ -36,6 +37,7 @@ __all__ = [
     "cache_set",
     "cache_delete",
     "cache_or_compute",
+    "with_lock",
 ]
 
 # Bump when the shape of a cached payload changes: readers then miss on the
@@ -209,3 +211,55 @@ def cache_or_compute(
     if won:
         cache_delete(lock_key)
     return value
+
+
+def _lock_gone(key: str) -> bool:
+    try:
+        return _cache().get(key) is None
+    except Exception:
+        return True
+
+
+@contextmanager
+def with_lock(
+    key: str,
+    timeout: int | float = _LOCK_TIMEOUT,
+    wait: int | float = _LOCK_MAX_WAIT,
+    poll: int | float = _LOCK_POLL_SECONDS,
+) -> Iterator[bool]:
+    """Best-effort exclusive lock (``SET NX EX``) as a context manager.
+
+    Yields ``True`` when we own the lock, ``False`` when it was held by
+    someone else (we waited up to ``wait`` seconds for them to finish).
+
+    **Callers must do the work regardless of the yielded value** — the lock
+    is a dedup optimisation, not a gate. The correct pattern is: enter the
+    lock, *re-check* whether the work is already done (a waiter may find the
+    holder's result), and do it if not. Storing the result *inside* the lock
+    means a waiter that observes the lock released can rely on a re-check.
+
+    Fail-open: if the backend is unavailable the lock is skipped and we
+    proceed unprotected (a cache problem must never block the work — and
+    with the cache down no coordination is possible anyway). The lock is
+    released on exit **only if we actually acquired it** — we never delete a
+    lock we don't own, which could delete another worker's lock. The ``EX``
+    timeout is the safety net for a holder that crashes.
+
+    ``timeout`` must outlive the critical section (e.g. an LLM call);
+    ``wait`` bounds how long a waiter blocks before proceeding in parallel
+    (graceful degradation: an extra computation, never a stalled request).
+    """
+    try:
+        acquired = _cache().add(key, "1", timeout)
+    except Exception:
+        acquired = None
+    owned = acquired is True
+    if acquired is False:
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline and not _lock_gone(key):
+            time.sleep(poll)
+    try:
+        yield owned
+    finally:
+        if owned:
+            cache_delete(key)

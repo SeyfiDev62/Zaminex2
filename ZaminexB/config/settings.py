@@ -277,6 +277,11 @@ def _cache_settings():
                 "LOCATION": redis_url,
                 "OPTIONS": {
                     "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                    # Plain JSON text in Redis — inspectable in redis-cli,
+                    # no pickle. Every consumer stores strings (cache_utils
+                    # payloads, DRF throttle counters), so the JSON
+                    # serializer is lossless for this app.
+                    "SERIALIZER": "django_redis.serializers.json.JSONSerializer",
                     # Fail-open: swallow backend errors as misses.
                     "IGNORE_EXCEPTIONS": True,
                     # A hung Redis must not stall requests: bound the connect

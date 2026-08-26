@@ -198,3 +198,33 @@ Tested by `apps/common/tests/test_cache_utils.py` (18 tests): key
 versioning, JSON/Decimal round-trip, corrupt/foreign payload → miss,
 fail-open helpers, dead-Redis → 200 request (real django-redis client against
 a closed port), lock wait/timeout/disabled, and the CACHES builder.
+
+## Phase 3 results — AI cache on Redis + global rate limits
+
+Phase 3 makes the two "zero-code-change" Redis wins real and robust
+(report: `benchmarks/reports/benchmark-phase3.json`). No benchmarked hot
+path is affected — all paths are flat vs Phase 2 as designed.
+
+- **AI cache on Redis**: `ai_service` now routes its description cache
+  through the Phase-2 helpers — versioned key
+  (`zaminex:v1:ai:desc:<entity>:<id>`), JSON payload (inspectable in
+  redis-cli), fail-open read/write. With `REDIS_URL` set the hot layer is
+  shared across all workers; the `AIInsightCache` DB row stays the
+  persistent source of truth (and the fail-open fallback).
+- **Thundering-herd protection**: the full-miss path runs under a per
+  `(entity, fingerprint)` `SET NX EX` lock (90 s, outliving the 60 s LLM
+  timeout; waiters block ≤15 s, then degrade to a parallel call). Concurrent
+  cold requests for the same record now pay for exactly **one** model call.
+- **Global rate limits**: DRF throttle counters were already cache-backed,
+  so with Redis they are exact across workers — no code change. Verified
+  live: 5 requests from one process + a 6th from another → 429, counter
+  visible in Redis.
+
+Tested by `apps/common/tests/test_phase3_benefits.py` (9 tests):
+cross-process AI cache consistency (two backend handles on one shared
+store), versioned/JSON key check, regeneration on changed data, concurrent
+cold requests → exactly one LLM call (threaded, `TransactionTestCase`),
+dead-cache fail-open (DB fallback), and the throttle counter shared across
+two connections. Live verification against a real Redis 6.0.9 covered the
+same scenarios end to end, including kill-Redis-mid-run → request served
+from the DB row with zero LLM calls.

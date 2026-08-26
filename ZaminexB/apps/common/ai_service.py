@@ -29,16 +29,22 @@ import urllib.request
 from typing import Any
 
 from django.conf import settings
-from django.core.cache import cache
 from django.utils import timezone
 
+from . import cache_utils
 from .models import AIInsightCache, CompanySettings
 
 # Cache TTL for generated descriptions (seconds). Even if the underlying data
 # did not change, we refresh the description at least once per period so it does
 # not go stale indefinitely.
 AI_CACHE_TTL = 7 * 24 * 3600  # 7 days
-CACHE_PREFIX = "ai:desc:"
+
+# Phase 3: the generation lock must outlive the longest possible LLM call
+# (AI_REQUEST_TIMEOUT, default 60 s) so a slow holder cannot be overtaken, and
+# a waiter blocks at most this long before degrading to a parallel generation
+# (an extra model call — never a stalled request).
+_AI_LOCK_TIMEOUT = 90
+_AI_LOCK_WAIT = 15
 
 
 class AIError(Exception):
@@ -346,13 +352,19 @@ def data_fingerprint(
 
 
 def _cache_key(entity: str, entity_id: Any) -> str:
-    """One in-process key per record (fingerprint lives inside the value)."""
-    return f"{CACHE_PREFIX}{entity}:{entity_id}"
+    """One key per record (fingerprint lives inside the value).
+
+    Phase 3: routed through the shared cache helpers — versioned
+    (``zaminex:v1:ai:desc:…``), JSON-encoded and fail-open, so the hot layer
+    is shared across workers via Redis, inspectable in redis-cli, and a
+    corrupt/dead cache entry is a miss, never a crash.
+    """
+    return cache_utils.make_key("ai", "desc", entity, entity_id)
 
 
 def _store_description(entity: str, entity_id: Any, fingerprint: str, description: dict) -> None:
     bundle = {"fingerprint": fingerprint, "description": description}
-    cache.set(_cache_key(entity, entity_id), bundle, timeout=AI_CACHE_TTL)
+    cache_utils.cache_set(_cache_key(entity, entity_id), bundle, AI_CACHE_TTL)
     AIInsightCache.objects.update_or_create(
         entity=entity,
         entity_id=int(entity_id),
@@ -361,7 +373,7 @@ def _store_description(entity: str, entity_id: Any, fingerprint: str, descriptio
 
 
 def _read_cached(entity: str, entity_id: Any, fingerprint: str) -> dict[str, Any] | None:
-    bundle = cache.get(_cache_key(entity, entity_id))
+    bundle = cache_utils.cache_get(_cache_key(entity, entity_id))
     if isinstance(bundle, dict) and bundle.get("fingerprint") == fingerprint:
         desc = bundle.get("description")
         if isinstance(desc, dict):
@@ -373,10 +385,10 @@ def _read_cached(entity: str, entity_id: Any, fingerprint: str) -> dict[str, Any
     age = timezone.now() - row.updated_at
     if row.fingerprint != fingerprint or age.total_seconds() > AI_CACHE_TTL:
         return None
-    cache.set(
+    cache_utils.cache_set(
         _cache_key(entity, entity_id),
         {"fingerprint": row.fingerprint, "description": row.payload},
-        timeout=AI_CACHE_TTL,
+        AI_CACHE_TTL,
     )
     return row.payload
 
@@ -389,10 +401,19 @@ def get_cached_description(
     Strategy (fingerprint + shared store + TTL):
 
       1. Fingerprint *this* record's stable analytics (entity + id mixed in).
-      2. Serve from the in-process cache, then from the database row, if the
-         fingerprint still matches and the row is within the TTL.
-      3. Otherwise call the model once and persist the result under this
+      2. Serve from the shared cache (Redis when ``REDIS_URL`` is set —
+         otherwise LocMem), then from the database row, if the fingerprint
+         still matches and the row is within the TTL.
+      3. Otherwise call the model and persist the result under this
          entity/id so another worker cannot mix it with a different record.
+
+    Phase 3 — "one model call per (record, data) per TTL", even under
+    concurrent cold starts: the full-miss path runs under a short per-key
+    lock, so when N workers miss at the same time only one of them pays the
+    LLM call; the rest wait briefly, re-check, and serve the winner's result
+    (degrading to a parallel call only if the winner is still slow). The
+    lock key includes the fingerprint, so changed data is never blocked by a
+    generation running for the old data.
 
     Raises ``AIError`` when AI is disabled/unconfigured or the call fails.
     """
@@ -404,6 +425,16 @@ def get_cached_description(
     if cached is not None:
         return cached
 
-    description = generate_description(data, entity=entity)
-    _store_description(entity, entity_id, current_fp, description)
-    return description
+    lock_key = cache_utils.make_key("ai", "lock", entity, entity_id, current_fp)
+    with cache_utils.with_lock(
+        lock_key, timeout=_AI_LOCK_TIMEOUT, wait=_AI_LOCK_WAIT
+    ):
+        # Re-check under the lock: the worker that held it may have just
+        # stored this exact fingerprint's result.
+        cached = _read_cached(entity, entity_id, current_fp)
+        if cached is not None:
+            return cached
+
+        description = generate_description(data, entity=entity)
+        _store_description(entity, entity_id, current_fp, description)
+        return description
