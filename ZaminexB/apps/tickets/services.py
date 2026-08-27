@@ -442,6 +442,17 @@ def mark_read(*, ticket: Ticket, actor) -> bool:
     participant.is_read = True
     participant.read_at = now
     participant.save(update_fields=["is_read", "read_at"])
+    # Phase 5: drop the actor's cached unread-count poll so their next badge
+    # poll is immediately fresh (the short TTL is only the backstop).
+    # Fail-open — a cache problem must never break the read action.
+    try:
+        from apps.common import cache_utils
+
+        cache_utils.cache_delete(
+            cache_utils.make_key("poll", "ticket-unread", actor.pk)
+        )
+    except Exception:  # pragma: no cover
+        pass
     _audit(locked_ticket, actor, TicketAuditAction.READ, {})
     return True
 

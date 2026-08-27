@@ -15,10 +15,12 @@ from apps.basics.models import (
     PropertyUsage,
 )
 
+from apps.common.testing import CacheClearingMixin
+
 User = get_user_model()
 
 
-class BasicsAPITestCase(TestCase):
+class BasicsAPITestCase(CacheClearingMixin, TestCase):
     """Shared fixture: one usage, two types, a deal type and some attributes."""
 
     @classmethod

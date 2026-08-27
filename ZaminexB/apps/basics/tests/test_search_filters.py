@@ -21,6 +21,8 @@ from apps.basics.models import (
 from apps.listings.models import Listing
 from apps.properties.models import Property, PropertyAttributeValue
 
+from apps.common.testing import CacheClearingMixin
+
 User = get_user_model()
 
 
@@ -239,7 +241,7 @@ class PriceFilterTests(TestCase):
         self.assertIn("P-3", self._codes("?priceMin=8000000000"))
 
 
-class SearchSchemaTests(TestCase):
+class SearchSchemaTests(CacheClearingMixin, TestCase):
     """What drives the filter bar."""
 
     @classmethod

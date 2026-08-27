@@ -65,6 +65,26 @@ from .services import (
 
 User = get_user_model()
 
+# Phase 5: the ticket unread badge is polled by the SPA (30 s, often from
+# several tabs). The count is tiny and per-user, so a very short per-user
+# TTL coalesces that polling into one query per user per window. A user's own
+# read (mark_read) drops their key immediately; the TTL is the backstop.
+# Fail-open: a cache problem falls back to the direct COUNT.
+TICKET_UNREAD_POLL_TTL = 10  # seconds (roadmap: 5-10 s)
+
+
+def cached_ticket_unread_count(user) -> int:
+    """Unread-ticket count for ``user`` behind a short per-user poll cache."""
+    from apps.common import cache_utils
+
+    key = cache_utils.make_key("poll", "ticket-unread", user.pk)
+    cached = cache_utils.cache_get(key)
+    if isinstance(cached, int):
+        return cached
+    count = user.ticket_participations.filter(is_read=False).count()
+    cache_utils.cache_set(key, count, TICKET_UNREAD_POLL_TTL)
+    return count
+
 
 class TicketViewSet(viewsets.ModelViewSet):
     """Role-scoped CRUD facade for the ticket workspace."""
@@ -575,8 +595,8 @@ class TicketViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="unread-count")
     def unread_count(self, request):
-        count = request.user.ticket_participations.filter(is_read=False).count()
-        return Response({"count": count})
+        # Phase 5: short per-user poll cache (see cached_ticket_unread_count).
+        return Response({"count": cached_ticket_unread_count(request.user)})
 
     @action(detail=False, methods=["get"])
     def export(self, request):
@@ -834,9 +854,8 @@ class TicketUnreadCountView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
-        return Response(
-            {"count": request.user.ticket_participations.filter(is_read=False).count()}
-        )
+        # Phase 5: short per-user poll cache (see cached_ticket_unread_count).
+        return Response({"count": cached_ticket_unread_count(request.user)})
 
 
 class TicketAttachmentDownloadView(APIView):

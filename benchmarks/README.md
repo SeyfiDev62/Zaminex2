@@ -269,3 +269,59 @@ all four entries, range-variant coexistence, invalidation on every related
 model (the roadmap acceptance: save a listing → report refreshes),
 per-user isolation (scope reports, dashboards), and fail-open (dead cache
 during reads *and* during saves).
+
+## Phase 5 results — reference-data caches, poll caches, pagination COUNT
+
+The three remaining QPS sources are cached (report:
+`benchmarks/reports/benchmark-phase5.json`), all fail-open, all on the
+Phase-2/3 cache infrastructure:
+
+| what | key | TTL | invalidation |
+|---|---|---|---|
+| reference data: catalog, location tree, property/listing/search form schemas (`/basics/api/…`) | `catalog`, `location-tree`, `schema:<kind>:<type-pk>[::<deal-pk>]` | 10 min | any save/delete on the 12 reference models (types, usages, attributes, options, bindings, province/city/district) — an admin edit is visible on the next request; the TTL is the backstop |
+| the notification bell poll (`/common/api/notifications/`) | `poll:notifications:<user_id>` | 10 s | the user's own mark-read drops their key immediately |
+| the ticket unread badge poll (`/tickets/api/unread-count/` + the viewset action) | `poll:ticket-unread:<user_id>` | 10 s | `mark_read` drops the actor's key immediately |
+| the list/search **COUNT** (`page_size`/`page` excluded from the key) | `count:<user_id>:<path>:<filters>` | 30 s | none — a ≤30 s stale *label* is the design (rows on the page are always a fresh slice) |
+
+The COUNT cache is the subtle one, and it is implemented so a stale count can
+never corrupt a response: the total is a *served* count (supplied to a
+minimal paginator that drives the `count` field and next/previous links but
+never re-COUNTs and never clamps the page slice). The page rows are always a
+fresh bounded `LIMIT/OFFSET` slice, so a stale total can at most surface an
+empty out-of-range page or an extra empty page that heals within the TTL —
+never a truncated page. A freshly computed total (cold key) keeps the stock
+404-on-out-of-range contract; a cached total is lenient about an out-of-range
+page for exactly that reason. The Phase-1 flatness guard
+(`ListingListQueryCountTests`) originally caught a first implementation that
+let Django's `top = min(top, count)` clamp truncate a page from a stale
+count; that is what the no-clamp slice fixes.
+
+### Phase 5 run vs the committed Phase 0 baseline (same machine; cumulative
+through Phases 1-5 — the Phase-5 contribution is the last column)
+
+| path | p50 ms (P0 → P5) | queries (P0 → P5) | Phase-5 contribution |
+|---|---:|---:|---|
+| properties-list-p1000 | 559.2 → 52.9 | 15 → 9 | COUNT cached (−1) |
+| properties-list-page1-p20 | 44.5 → 21.4 | 15 → 9 | COUNT cached (−1) |
+| properties-search-p20 | 118.6 → 39.1 | 16 → 10 | the expensive trgm COUNT is skipped on warm runs (−1) |
+| listings-list-p1000 | 6602.0 → 56.9 | 8008 → 11 | COUNT cached (−1) |
+| listings-search-p20 | 230.2 → 59.1 | 169 → 13 | trgm COUNT skipped on warm runs (−1) |
+| catalog (live, 1000-row dataset) | — | 45 → 5 | whole catalogue from the 10-min cache |
+| location tree (live) | — | 8 → 5 | 10-min cache, invalidated on any geo save |
+| notifications poll (live) | — | 7 → 5 | 10 s per-user cache |
+| ticket unread poll (live) | — | 6 → 5 | 10 s per-user cache |
+| dashboard-analytics / property-report | 12361.8 → 12.7 / 38.3 → 8.8 | 9000+ → 5 / 19 → 10 | unchanged (already cached in Phase 4) |
+
+A targeted A/B on the search path (small dataset, where the COUNT is cheap):
+cache ON cold 60 ms/11 q → warm 17 ms/10 q vs cache OFF 18 ms/11 q → 19 ms/11 q
+— the saved COUNT is the difference, and it is the dominant cost at scale.
+
+Tested by `apps/common/tests/test_phase5_caching.py` (19 tests): hit/miss on
+every entry, per-type schema isolation, invalidation on type/attribute/
+district saves **and deletes** (a deleted type's stale key is dropped),
+per-user isolation of polls and counts, count isolation per filter, the
+stale-count safety property (deleted rows → 200 with a shorter page, never a
+500), and fail-open on a dead cache for every entry. Because Django's
+`TestCase` rolls back the DB but not the cache, the affected pre-existing
+basics test bases gained the shared `CacheClearingMixin`
+(`apps/common/testing.py`) so cached payloads never leak across tests.

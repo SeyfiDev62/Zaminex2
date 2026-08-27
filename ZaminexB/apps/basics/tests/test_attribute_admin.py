@@ -23,6 +23,8 @@ from apps.basics.models import (
 )
 from apps.properties.models import Property, PropertyAttributeValue
 
+from apps.common.testing import CacheClearingMixin
+
 User = get_user_model()
 
 
@@ -232,7 +234,7 @@ class AttributeOptionTests(TestCase):
         )
 
 
-class BindingPanelTests(TestCase):
+class BindingPanelTests(CacheClearingMixin, TestCase):
     """What the "اتصال به انواع" tab does."""
 
     @classmethod

@@ -12,6 +12,8 @@ Two groups of endpoints:
 
 from __future__ import annotations
 
+import logging
+
 from django.db.models import Prefetch
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -20,6 +22,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import UserRole
+from apps.common import cache_utils
+
+logger = logging.getLogger(__name__)
 
 from .models import (
     Attribute,
@@ -401,6 +406,240 @@ def _active_links(manager):
     )
 
 
+# ---------------------------------------------------------------------------
+#  Phase 5 — reference-data caches (catalog, location tree, form schemas)
+#
+#  The dynamic forms, search filters and cascading location selects all render
+#  from these reference tables, and every wizard / filter / page load hit the
+#  endpoints. The data changes only when an admin edits the reference tables,
+#  so each response is cached with a 10-minute TTL (roadmap) plus signal
+#  invalidation: any save/delete on a reference model drops the keys, and an
+#  admin change is visible on the very next request — the TTL is the backstop
+#  for anything the signals miss. Fail-open throughout: a cache problem
+#  degrades to a direct query.
+# ---------------------------------------------------------------------------
+
+REFERENCE_TTL = 600  # 10 minutes (roadmap)
+
+
+def _build_catalog_payload() -> dict:
+    usages = PropertyUsage.objects.filter(is_active=True)
+    types = (
+        PropertyType.objects.filter(is_active=True)
+        .select_related("property_usage")
+    )
+    deals = DealType.objects.filter(is_active=True)
+    return {
+        "usages": PropertyUsageSerializer(usages, many=True).data,
+        "propertyTypes": PropertyTypeSerializer(types, many=True).data,
+        "dealTypes": DealTypeSerializer(deals, many=True).data,
+    }
+
+
+def cached_basics_catalog() -> dict:
+    key = cache_utils.make_key("catalog")
+    return cache_utils.cache_or_compute(key, _build_catalog_payload, REFERENCE_TTL)
+
+
+def _build_location_tree_payload() -> list:
+    provinces = (
+        Province.objects.filter(is_active=True)
+        .prefetch_related(
+            Prefetch("cities", queryset=City.objects.filter(is_active=True)),
+            Prefetch(
+                "cities__districts",
+                queryset=District.objects.filter(is_active=True),
+            ),
+        )
+    )
+    return [
+        {
+            "id": province.id,
+            "name": province.name,
+            "displayName": province.display_name,
+            "cities": [
+                {
+                    "id": city.id,
+                    "name": city.name,
+                    "displayName": city.display_name,
+                    "districts": [
+                        {
+                            "id": district.id,
+                            "name": district.name,
+                            "displayName": district.display_name,
+                        }
+                        for district in city.districts.all()
+                    ],
+                }
+                for city in province.cities.all()
+            ],
+        }
+        for province in provinces
+    ]
+
+
+def cached_location_tree() -> list:
+    key = cache_utils.make_key("location-tree")
+    return cache_utils.cache_or_compute(
+        key, _build_location_tree_payload, REFERENCE_TTL
+    )
+
+
+def _build_property_form_payload(property_type: PropertyType) -> dict:
+    links = _active_links(property_type.attribute_links)
+    fields = FormFieldSerializer(links, many=True).data
+    return {
+        "propertyType": {
+            "id": property_type.id,
+            "name": property_type.name,
+            "displayName": property_type.display_name,
+        },
+        "propertyUsage": {
+            "id": property_type.property_usage_id,
+            "name": property_type.property_usage.name,
+            "displayName": property_type.property_usage.display_name,
+        },
+        # Split out so the form can group facilities into a checkbox block
+        # without re-deriving the grouping client-side.
+        "fields": [f for f in fields if not f["isFacility"]],
+        "facilities": [f for f in fields if f["isFacility"]],
+    }
+
+
+def cached_property_form_schema(property_type_pk: int) -> dict:
+    key = cache_utils.make_key("schema", "property-form", property_type_pk)
+
+    def compute():
+        property_type = (
+            PropertyType.objects.select_related("property_usage")
+            .filter(pk=property_type_pk)
+            .first()
+        )
+        if property_type is None:  # pragma: no cover - view 404s first
+            return None
+        return _build_property_form_payload(property_type)
+
+    return cache_utils.cache_or_compute(key, compute, REFERENCE_TTL)
+
+
+def _build_listing_form_payload(deal_type: DealType) -> dict:
+    links = _active_links(deal_type.attribute_links)
+    fields = FormFieldSerializer(links, many=True).data
+    return {
+        "dealType": {
+            "id": deal_type.id,
+            "name": deal_type.name,
+            "displayName": deal_type.display_name,
+        },
+        "fields": [f for f in fields if not f["isFacility"]],
+        "facilities": [f for f in fields if f["isFacility"]],
+    }
+
+
+def cached_listing_form_schema(deal_type_pk: int) -> dict:
+    key = cache_utils.make_key("schema", "listing-form", deal_type_pk)
+
+    def compute():
+        deal_type = DealType.objects.filter(pk=deal_type_pk).first()
+        if deal_type is None:  # pragma: no cover - view 404s first
+            return None
+        return _build_listing_form_payload(deal_type)
+
+    return cache_utils.cache_or_compute(key, compute, REFERENCE_TTL)
+
+
+def _build_search_payload(property_type, deal_type) -> dict:
+    property_filters = (
+        SearchFilterSerializer(
+            _active_links(property_type.search_attribute_links), many=True
+        ).data
+        if property_type is not None
+        else []
+    )
+    deal_filters = (
+        SearchFilterSerializer(
+            _active_links(deal_type.search_attribute_links), many=True
+        ).data
+        if deal_type is not None
+        else []
+    )
+    return {"propertyFilters": property_filters, "dealFilters": deal_filters}
+
+
+def cached_search_schema(property_type_pk, deal_type_pk) -> dict:
+    key = cache_utils.make_key(
+        "schema", "search", property_type_pk or "-", deal_type_pk or "-"
+    )
+
+    def compute():
+        property_type = (
+            PropertyType.objects.filter(pk=property_type_pk).first()
+            if property_type_pk
+            else None
+        )
+        deal_type = (
+            DealType.objects.filter(pk=deal_type_pk).first()
+            if deal_type_pk
+            else None
+        )
+        return _build_search_payload(property_type, deal_type)
+
+    return cache_utils.cache_or_compute(key, compute, REFERENCE_TTL)
+
+
+def _all_reference_keys(extra_pts=(), extra_dts=()) -> list:
+    """Every reference-data key that could be cached.
+
+    ``extra_pts`` / ``extra_dts`` add PKs that are being changed *right now*.
+    That matters for deletes: a row that was just removed is no longer
+    enumerated from the table, but its cached key must still be dropped —
+    otherwise a deleted type's stale schema would linger until the TTL.
+    """
+    pts = list(PropertyType.objects.values_list("pk", flat=True))
+    dts = list(DealType.objects.values_list("pk", flat=True))
+    for pk in extra_pts:
+        if pk not in pts:
+            pts.append(pk)
+    for pk in extra_dts:
+        if pk not in dts:
+            dts.append(pk)
+    keys = [
+        cache_utils.make_key("catalog"),
+        cache_utils.make_key("location-tree"),
+    ]
+    for pt in pts:
+        keys.append(cache_utils.make_key("schema", "property-form", pt))
+    for dt in dts:
+        keys.append(cache_utils.make_key("schema", "listing-form", dt))
+    for pt in [*pts, None]:
+        for dt in [*dts, None]:
+            keys.append(
+                cache_utils.make_key("schema", "search", pt or "-", dt or "-")
+            )
+    return keys
+
+
+def invalidate_reference_caches(sender=None, instance=None, **kwargs) -> None:
+    """Drop every reference-data key. Signal receiver; fail-open.
+
+    A reference save is a rare admin action, so the cost (two small PK
+    lookups + a few dozen cheap deletes) is a rounding error, and it is what
+    makes an admin change visible within a second instead of up to the TTL.
+    The changed entity's own PK is passed through so a *delete* still drops
+    the key for the (now-gone) row.
+    """
+    extra_pts = (instance.pk,) if instance is not None and sender is PropertyType else ()
+    extra_dts = (instance.pk,) if instance is not None and sender is DealType else ()
+    try:
+        for key in _all_reference_keys(extra_pts, extra_dts):
+            cache_utils.cache_delete(key)
+    except Exception:  # pragma: no cover
+        logger.debug(
+            "reference cache invalidation failed; the TTL is the backstop",
+            exc_info=True,
+        )
+
+
 class PropertyFormSchemaView(APIView):
     """Fields the "افزودن ملک" form should render for a property type.
 
@@ -430,27 +669,10 @@ class PropertyFormSchemaView(APIView):
                 {"detail": "نوع ملک یافت نشد."}, status=status.HTTP_404_NOT_FOUND
             )
 
-        links = _active_links(property_type.attribute_links)
-        fields = FormFieldSerializer(links, many=True).data
-
-        return Response(
-            {
-                "propertyType": {
-                    "id": property_type.id,
-                    "name": property_type.name,
-                    "displayName": property_type.display_name,
-                },
-                "propertyUsage": {
-                    "id": property_type.property_usage_id,
-                    "name": property_type.property_usage.name,
-                    "displayName": property_type.property_usage.display_name,
-                },
-                # Split out so the form can group facilities into a checkbox
-                # block without re-deriving the grouping client-side.
-                "fields": [f for f in fields if not f["isFacility"]],
-                "facilities": [f for f in fields if f["isFacility"]],
-            }
-        )
+        # Phase 5: the payload (fields + facilities) is cached per type
+        # (10-min TTL, invalidated on any reference save).
+        payload = cached_property_form_schema(property_type.pk)
+        return Response(payload)
 
 
 class ListingFormSchemaView(APIView):
@@ -476,20 +698,8 @@ class ListingFormSchemaView(APIView):
                 {"detail": "نوع معامله یافت نشد."}, status=status.HTTP_404_NOT_FOUND
             )
 
-        links = _active_links(deal_type.attribute_links)
-        fields = FormFieldSerializer(links, many=True).data
-
-        return Response(
-            {
-                "dealType": {
-                    "id": deal_type.id,
-                    "name": deal_type.name,
-                    "displayName": deal_type.display_name,
-                },
-                "fields": [f for f in fields if not f["isFacility"]],
-                "facilities": [f for f in fields if f["isFacility"]],
-            }
-        )
+        # Phase 5: cached per deal type (see cached_property_form_schema).
+        return Response(cached_listing_form_schema(deal_type.pk))
 
 
 class SearchSchemaView(APIView):
@@ -508,8 +718,8 @@ class SearchSchemaView(APIView):
         property_type_raw = request.query_params.get("propertyType")
         deal_type_raw = request.query_params.get("dealType")
 
-        property_filters = []
-        deal_filters = []
+        property_type_pk = None
+        deal_type_pk = None
 
         if property_type_raw:
             lookup = (
@@ -522,9 +732,7 @@ class SearchSchemaView(APIView):
                 return Response(
                     {"detail": "نوع ملک یافت نشد."}, status=status.HTTP_404_NOT_FOUND
                 )
-            property_filters = SearchFilterSerializer(
-                _active_links(property_type.search_attribute_links), many=True
-            ).data
+            property_type_pk = property_type.pk
 
         if deal_type_raw:
             lookup = (
@@ -535,15 +743,14 @@ class SearchSchemaView(APIView):
             deal_type = DealType.objects.filter(**lookup).first()
             if deal_type is None:
                 return Response(
-                    {"detail": "نوع معامله یافت نشد."}, status=status.HTTP_404_NOT_FOUND
+                    {"detail": "نوع معامله یافت نشد."},
+                    status=status.HTTP_404_NOT_FOUND,
                 )
-            deal_filters = SearchFilterSerializer(
-                _active_links(deal_type.search_attribute_links), many=True
-            ).data
+            deal_type_pk = deal_type.pk
 
-        return Response(
-            {"propertyFilters": property_filters, "dealFilters": deal_filters}
-        )
+        # Phase 5: cached per (property type, deal type) pair; the
+        # no-parameter variant (shared filters) has its own key too.
+        return Response(cached_search_schema(property_type_pk, deal_type_pk))
 
 
 class BasicsCatalogView(APIView):
@@ -557,17 +764,9 @@ class BasicsCatalogView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        usages = PropertyUsage.objects.filter(is_active=True)
-        types = PropertyType.objects.filter(is_active=True).select_related("property_usage")
-        deals = DealType.objects.filter(is_active=True)
-
-        return Response(
-            {
-                "usages": PropertyUsageSerializer(usages, many=True).data,
-                "propertyTypes": PropertyTypeSerializer(types, many=True).data,
-                "dealTypes": DealTypeSerializer(deals, many=True).data,
-            }
-        )
+        # Phase 5: the whole catalogue is one short-TTL cache entry,
+        # invalidated on any reference save.
+        return Response(cached_basics_catalog())
 
 
 # ---------------------------------------------------------------------------
@@ -691,40 +890,6 @@ class LocationTreeView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        provinces = (
-            Province.objects.filter(is_active=True)
-            .prefetch_related(
-                Prefetch("cities", queryset=City.objects.filter(is_active=True)),
-                Prefetch(
-                    "cities__districts",
-                    queryset=District.objects.filter(is_active=True),
-                ),
-            )
-        )
-
-        return Response(
-            [
-                {
-                    "id": province.id,
-                    "name": province.name,
-                    "displayName": province.display_name,
-                    "cities": [
-                        {
-                            "id": city.id,
-                            "name": city.name,
-                            "displayName": city.display_name,
-                            "districts": [
-                                {
-                                    "id": district.id,
-                                    "name": district.name,
-                                    "displayName": district.display_name,
-                                }
-                                for district in city.districts.all()
-                            ],
-                        }
-                        for city in province.cities.all()
-                    ],
-                }
-                for province in provinces
-            ]
-        )
+        # Phase 5: the whole tree is one short-TTL cache entry, invalidated
+        # on any province/city/district change.
+        return Response(cached_location_tree())
