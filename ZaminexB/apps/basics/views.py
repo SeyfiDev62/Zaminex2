@@ -347,12 +347,23 @@ class PropertyTypeAttributeViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        changed = 0
         for item in payload:
             link_id = item.get("id")
             sort_order = item.get("sortOrder", item.get("sort_order"))
             if link_id is None or sort_order is None:
                 continue
             PropertyTypeAttribute.objects.filter(pk=link_id).update(sort_order=sort_order)
+            changed += 1
+
+        # Phase 5: ``QuerySet.update`` bypasses the ``post_save`` signals, so
+        # the signal-driven reference-cache invalidation never fires here —
+        # drop the keys explicitly. Without this, a reordered field order
+        # would linger in the 10-minute schema cache (catalog included).
+        # Fail-open: the receiver swallows cache errors; the TTL is the
+        # backstop either way.
+        if changed:
+            invalidate_reference_caches()
 
         return Response({"detail": "ترتیب ذخیره شد."})
 

@@ -325,3 +325,36 @@ stale-count safety property (deleted rows → 200 with a shorter page, never a
 `TestCase` rolls back the DB but not the cache, the affected pre-existing
 basics test bases gained the shared `CacheClearingMixin`
 (`apps/common/testing.py`) so cached payloads never leak across tests.
+
+## Phase 5 completion — spec gap closure
+
+The Phase-5 spec has three work items; all three were delivered in the first
+commit. A spec-by-spec re-audit against the roadmap table found one
+invalidation gap — the admin **reorder** of form fields persists through
+`QuerySet.update()`, which bypasses the `post_save` signals that drive the
+reference-cache invalidation, so a reordered field order would linger in the
+10-minute schema cache instead of being visible on the next request. This
+section documents the closure:
+
+| spec item (roadmap) | status |
+|---|---|
+| form schemas (property-form / listing-form / search) + catalog + location tree — TTL 10 min + signal invalidation on the basics tables | ✅ (first commit); **gap closed**: `PropertyTypeAttributeViewSet.reorder` now drops the reference keys explicitly after its `update()`-based write (an empty/no-op payload leaves the cache alone); the reordered order is visible on the very next request, the TTL remains the backstop |
+| poll endpoints (notifications + ticket unread-count) — per-user cache, TTL 5–10 s | ✅ (first commit): 10 s per user, own mark-read drops the key immediately; the SPA's 30 s multi-tab polling coalesces into one query per user per window |
+| pagination COUNT cache — key (endpoint + scope + filters), TTL 30 s, especially under trgm search | ✅ (first commit): `StandardResultsSetPagination.count_cache_ttl = 30`, key `(user, path, filters)` with `page`/`page_size` excluded — active on properties, listings, tickets and the follow-ups large-list variant; the page rows stay a fresh bounded slice that a stale count can never truncate |
+| tests: hit/miss + basics invalidation + per-user isolation + fail-open | ✅ (first commit, 19 tests) + **2 new**: reorder invalidates the schema cache; a no-op reorder keeps it warm |
+
+Re-verified after the closure (same machine, 1000 seeded properties /
+2000 listings, report: `benchmarks/reports/benchmark-phase5.json` — refreshed):
+
+| path | p50 ms | queries | vs the committed Phase-5 run |
+|---|---:|---:|---|
+| properties-list-p1000 (guard check) | 50.3 | 9 | 52.9 / 9 — flat |
+| properties-list-page1-p20 | 21.9 | 9 | 21.4 / 9 — flat |
+| properties-search-p20 | 34.8 | 10 | 39.1 / 10 — flat |
+| listings-list-p1000 (guard check) | 57.5 | 11 | 56.9 / 11 — flat |
+| listings-search-p20 | 61.6 | 13 | 59.1 / 13 — flat |
+| dashboard-analytics / property-report | 11.3 / 7.9 | 5 / 10 | 12.7 / 8.8, 5 / 10 — unchanged (Phase 4) |
+
+Full suite after the closure: 644 tests (642 + 2 new), failure set identical
+to the 50 pre-existing ones (0 new, 0 fixed) — the three pre-existing tests
+that exercise the reorder endpoint still pass.

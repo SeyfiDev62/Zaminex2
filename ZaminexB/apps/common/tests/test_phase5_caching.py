@@ -227,6 +227,57 @@ class ReferenceInvalidationTests(Phase5Base):
         key = cache_utils.make_key("schema", "listing-form", self.dt.pk)
         self.assertIsNone(cache_utils.cache_get(key))
 
+    def test_reorder_invalidates_the_form_schema(self):
+        """``reorder`` persists via ``QuerySet.update`` (no signals fire), so
+        the view must drop the reference caches itself — a reordered field
+        order is visible on the next request, not after the 10-min TTL."""
+        self._seed_reference()
+        from apps.basics.models import PropertyTypeAttribute
+
+        link = PropertyTypeAttribute.objects.create(
+            property_type=self.pt, attribute=self.attribute, sort_order=1
+        )
+        calls = []
+        with mock.patch.object(
+            basics_views,
+            "_build_property_form_payload",
+            side_effect=lambda pt: calls.append(1) or {"fields": []},
+        ):
+            self.client.get(f"/basics/api/schema/property-form/?propertyType={self.pt.pk}")
+            self.assertEqual(calls, [1])
+
+            res = self.client.post(
+                "/basics/api/property-type-attributes/reorder/",
+                data={"order": [{"id": link.pk, "sortOrder": 2}]},
+                content_type="application/json",
+            )
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(PropertyTypeAttribute.objects.get(pk=link.pk).sort_order, 2)
+
+            # The reorder dropped the keys → the next read recomputes.
+            self.client.get(f"/basics/api/schema/property-form/?propertyType={self.pt.pk}")
+        self.assertEqual(calls, [1, 1])
+
+    def test_reorder_noop_payload_keeps_the_cache(self):
+        """A reorder with no valid entries changes nothing, so the cache is
+        left alone (one invalidation per real write, not per request)."""
+        self._seed_reference()
+        calls = []
+        with mock.patch.object(
+            basics_views,
+            "_build_property_form_payload",
+            side_effect=lambda pt: calls.append(1) or {"fields": []},
+        ):
+            self.client.get(f"/basics/api/schema/property-form/?propertyType={self.pt.pk}")
+            res = self.client.post(
+                "/basics/api/property-type-attributes/reorder/",
+                data={"order": []},
+                content_type="application/json",
+            )
+            self.assertEqual(res.status_code, 200)
+            self.client.get(f"/basics/api/schema/property-form/?propertyType={self.pt.pk}")
+        self.assertEqual(calls, [1])  # still a hit
+
 
 class PollCacheTests(Phase5Base):
     def test_notifications_poll_second_read_is_a_hit(self):
