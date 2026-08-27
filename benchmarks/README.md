@@ -358,3 +358,58 @@ Re-verified after the closure (same machine, 1000 seeded properties /
 Full suite after the closure: 644 tests (642 + 2 new), failure set identical
 to the 50 pre-existing ones (0 new, 0 fixed) — the three pre-existing tests
 that exercise the reorder endpoint still pass.
+
+## Phase 6 results — session on `cached_db` (cache in front of the session table)
+
+Phase 6 moves the `django_session` table behind the same cache front as every
+other hot read: `SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"`
+(report: `benchmarks/reports/benchmark-phase6.json`).
+
+* **Read**: a warm request's session load is a cache hit — the per-request
+  session `SELECT` against `django_session` is gone (the phase's stated win:
+  one fewer DB round trip per request).
+* **Write**: the session still persists to the table on every save
+  (`SESSION_SAVE_EVERY_REQUEST=True` is kept — the 12-hour idle timeout depends
+  on it). That is exactly what makes a cache flush harmless: the row is always
+  in the table, so a flushed cache costs at most one reload.
+* **Fail-open**: with the Phase-2 `IGNORE_EXCEPTIONS=True` CACHES config a dead
+  Redis presents as "always a miss / no-op writes", and the store degrades
+  transparently to the plain DB engine — login, requests and logout keep
+  working (the store also wraps its own cache calls). No 500s.
+* **No migration**: `cached_db` uses the same `django_session` table.
+
+The roadmap's *optional* LoginAttempt → atomic Redis counter is **deferred by
+design**: it is gated on a real brute-force/scale trigger, and the current DB
+lockout (one row per username, touched only by *failed* logins, behind the
+Phase-3 global 10/min login throttle) is sufficient at the current scale.
+
+### Phase 6 vs the committed Phase 5 run (same machine, 1000 seeded properties / 2000 listings)
+
+| path | p50 ms (P5 → P6) | queries (P5 → P6) | Phase-6 contribution |
+|---|---:|---:|---|
+| properties-list-p1000 (guard) | 50.3 → 47.5 | 9 → 8 | session SELECT dropped (−1) |
+| properties-list-page1-p20 | 21.9 → 21.1 | 9 → 8 | session SELECT dropped (−1) |
+| properties-search-p20 | 34.8 → 35.8 | 10 → 9 | session SELECT dropped (−1); flat |
+| properties-detail | 14.1 → 13.6 | 12 → 11 | session SELECT dropped (−1) |
+| listings-list-p1000 (guard) | 57.5 → 58.0 | 11 → 10 | session SELECT dropped (−1) |
+| listings-search-p20 | 61.6 → 64.0 | 13 → 12 | session SELECT dropped (−1); flat |
+| dashboard-analytics | 11.3 → 11.4 | 5 → 4 | session SELECT dropped (−1); unchanged from Phase 4 |
+| property-report | 7.9 → 7.5 | 10 → 9 | session SELECT dropped (−1) |
+| properties-list-all-100loop | 560.0 → 586.2 | 99 → 88 | 10 pages × (−1) session SELECT; flat in ms |
+
+Every path drops exactly one session-table round trip (the read); latency is
+flat (the saved `SELECT` is a small indexed lookup — the win is QPS against
+the session table, which compounds at scale).
+
+Tested by `apps/common/tests/test_phase6_sessions.py` (6 tests): the session
+survives a cache flush (roadmap acceptance #1 — repopulated from the table and
+re-cached), a warm request issues exactly one fewer session-table query than a
+cold one, login + authenticated requests + logout all work against a dead
+fail-open cache, logout clears the session from table *and* cache, and the
+login lockout still blocks even a correct password (roadmap acceptance #2).
+The one Phase-1 query-count constant that counted the session read
+(`test_effective_price.QueryCountTests`) was updated 10 → 9 to reflect the
+dropped session `SELECT`.
+
+Full suite after Phase 6: 650 tests (644 + 6 new), failure set identical to
+the 50 pre-existing ones (0 new, 0 fixed).

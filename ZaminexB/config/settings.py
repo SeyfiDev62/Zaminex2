@@ -348,6 +348,22 @@ DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000
 SESSION_COOKIE_AGE = 12 * 60 * 60  # 12 hours
 SESSION_SAVE_EVERY_REQUEST = True
 SESSION_EXPIRE_AT_BROWSER_CLOSE = False
+
+# Phase 6: the session table gets the same treatment as every other hot read —
+# the cache goes in front of it. ``cached_db`` reads the session from the
+# cache and only touches ``django_session`` on a miss (and always persists the
+# write to the table), so:
+#   * a warm request saves the session SELECT (one fewer DB round trip — the
+#     point of the phase, since SESSION_SAVE_EVERY_REQUEST already writes on
+#     every request),
+#   * a cache flush can never kill a logged-in session: the row stays in the
+#     table and the next read reloads it,
+#   * fail-open: with the Phase-2 CACHES config (IGNORE_EXCEPTIONS=True) a dead
+#     Redis presents as "always a miss / no-op writes", and the store then
+#     degrades transparently to the plain DB engine — no 500s on login,
+#     requests or logout (the store also wraps its own cache calls).
+# No migration: cached_db uses the same django_session table.
+SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
 # CSRF cookie must be readable by JS to set the X-CSRFToken header from the
 # SPA; keep it scoped to the same site and HttpOnly off (this is standard
 # for a session-authenticated SPA).
