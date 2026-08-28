@@ -1,0 +1,151 @@
+{
+  "meta": {
+    "benchmark": "zaminex-phase6-after",
+    "generated_at": "2026-08-27T14:52:02.092124+00:00",
+    "django": "5.2.16",
+    "dataset": {
+      "properties": 1000,
+      "listings": 2000,
+      "tasks": 334,
+      "followups": 334,
+      "source": "seeded"
+    },
+    "runs": 5,
+    "method": "single user (admin), sequential requests through the Django test client (full middleware + DRF, no network); 1 warm-up run discarded per path",
+    "phase": "Phase 6 (session hardening): SESSION_ENGINE = cached_db — the cache is in front of the django_session table. A warm request saves the session SELECT (one fewer DB round trip per request, measured: exactly -1 query on every path, -11 on the 100-row loop); the session write still lands in the table, so a cache flush can never kill a logged-in session, and a dead cache (IGNORE_EXCEPTIONS fail-open) degrades transparently to the plain DB engine. The optional LoginAttempt -> atomic Redis counter stays deferred by design (gated on a real brute-force/scale trigger; the DB lockout, one row per username, touched only by failed logins, behind the Phase-3 global 10/min login throttle, is sufficient at the current scale)."
+  },
+  "results": {
+    "properties-list-p1000": {
+      "status": 200,
+      "p50_ms": 47.47,
+      "p95_ms": 71.56,
+      "max_ms": 71.56,
+      "mean_ms": 52.27,
+      "payload_bytes_mean": 104544,
+      "payload_bytes_max": 104544,
+      "queries_mean": 8.0,
+      "queries_max": 8,
+      "db_ms_mean": 8.6
+    },
+    "properties-list-page1-p20": {
+      "status": 200,
+      "p50_ms": 21.06,
+      "p95_ms": 36.72,
+      "max_ms": 36.72,
+      "mean_ms": 25.2,
+      "payload_bytes_mean": 21006,
+      "payload_bytes_max": 21006,
+      "queries_mean": 8.0,
+      "queries_max": 8,
+      "db_ms_mean": 8.4
+    },
+    "properties-list-page50-p20": {
+      "status": 200,
+      "p50_ms": 21.91,
+      "p95_ms": 22.34,
+      "max_ms": 22.34,
+      "mean_ms": 21.7,
+      "payload_bytes_mean": 21011,
+      "payload_bytes_max": 21011,
+      "queries_mean": 8.0,
+      "queries_max": 8,
+      "db_ms_mean": 5.4
+    },
+    "properties-search-p20": {
+      "status": 200,
+      "p50_ms": 35.84,
+      "p95_ms": 37.77,
+      "max_ms": 37.77,
+      "mean_ms": 36.4,
+      "payload_bytes_mean": 21058,
+      "payload_bytes_max": 21058,
+      "queries_mean": 9.0,
+      "queries_max": 9,
+      "db_ms_mean": 17.0
+    },
+    "properties-detail": {
+      "status": 200,
+      "p50_ms": 13.6,
+      "p95_ms": 56.72,
+      "max_ms": 56.72,
+      "mean_ms": 22.29,
+      "payload_bytes_mean": 1306,
+      "payload_bytes_max": 1306,
+      "queries_mean": 11.0,
+      "queries_max": 11,
+      "db_ms_mean": 2.2
+    },
+    "listings-list-p1000": {
+      "status": 200,
+      "p50_ms": 58.0,
+      "p95_ms": 61.86,
+      "max_ms": 61.86,
+      "mean_ms": 58.24,
+      "payload_bytes_mean": 79058,
+      "payload_bytes_max": 79058,
+      "queries_mean": 10.0,
+      "queries_max": 10,
+      "db_ms_mean": 17.4
+    },
+    "listings-list-page1-p20": {
+      "status": 200,
+      "p50_ms": 34.65,
+      "p95_ms": 74.7,
+      "max_ms": 74.7,
+      "mean_ms": 42.38,
+      "payload_bytes_mean": 15884,
+      "payload_bytes_max": 15884,
+      "queries_mean": 10.0,
+      "queries_max": 10,
+      "db_ms_mean": 15.2
+    },
+    "listings-search-p20": {
+      "status": 200,
+      "p50_ms": 63.99,
+      "p95_ms": 66.32,
+      "max_ms": 66.32,
+      "mean_ms": 64.27,
+      "payload_bytes_mean": 15959,
+      "payload_bytes_max": 15959,
+      "queries_mean": 12.0,
+      "queries_max": 12,
+      "db_ms_mean": 39.8
+    },
+    "dashboard-analytics": {
+      "status": 200,
+      "p50_ms": 11.36,
+      "p95_ms": 11.96,
+      "max_ms": 11.96,
+      "mean_ms": 11.44,
+      "payload_bytes_mean": 219904,
+      "payload_bytes_max": 219904,
+      "queries_mean": 4.0,
+      "queries_max": 4,
+      "db_ms_mean": 0.4
+    },
+    "property-report": {
+      "status": 200,
+      "p50_ms": 7.51,
+      "p95_ms": 8.2,
+      "max_ms": 8.2,
+      "mean_ms": 7.55,
+      "payload_bytes_mean": 3249,
+      "payload_bytes_max": 3249,
+      "queries_mean": 9.0,
+      "queries_max": 9,
+      "db_ms_mean": 0.0
+    },
+    "properties-list-all-100loop": {
+      "status": 200,
+      "p50_ms": 586.22,
+      "p95_ms": 633.82,
+      "max_ms": 633.82,
+      "mean_ms": 589.77,
+      "payload_bytes_mean": 1055386,
+      "payload_bytes_max": 1055386,
+      "queries_mean": 88.0,
+      "queries_max": 88,
+      "db_ms_mean": 94.2
+    }
+  }
+}

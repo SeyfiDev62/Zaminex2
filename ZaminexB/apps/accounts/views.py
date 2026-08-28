@@ -1,6 +1,7 @@
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.views import LoginView
 from django.db import transaction
+from django.http import HttpResponseRedirect
 from django.middleware.csrf import get_token
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import ensure_csrf_cookie
@@ -18,8 +19,30 @@ from .serializers import AdminProfileSerializer, ConsultantProfileSerializer
 @method_decorator(ensure_csrf_cookie, name="dispatch")
 class CustomLoginView(LoginView):
     template_name = "accounts/login.html"
-    redirect_authenticated_user = True
     form_class = ZaminexAuthenticationForm
+
+    def get(self, request, *args, **kwargs):
+        """Redirect an already-authenticated visitor back into the app.
+
+        Deliberately scoped to ``GET`` only. Django's ``redirect_authenticated_user``
+        flag would do the same, but it is enforced in ``LoginView.dispatch`` for
+        *every* HTTP method — including the login-form ``POST``. With the flag on,
+        a user who submits the login form while another user's session is still
+        active (e.g. switching accounts in one browser) gets a silent 302 to the
+        dashboard: the submitted credentials are never processed and the previous
+        user stays logged in. By handling the redirect here (GET only), the POST
+        is always processed, so Django's ``login()`` flushes the old user's session
+        and the newly submitted user is the one who ends up authenticated.
+        """
+        if request.user.is_authenticated:
+            redirect_to = self.get_success_url()
+            if redirect_to == request.path:
+                raise ValueError(
+                    "Redirection loop for authenticated user detected. Check that "
+                    "your LOGIN_REDIRECT_URL doesn't point to a login page."
+                )
+            return HttpResponseRedirect(redirect_to)
+        return super().get(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

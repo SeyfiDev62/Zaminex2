@@ -1,0 +1,138 @@
+{
+  "meta": {
+    "benchmark": "zaminex-phase0-baseline",
+    "generated_at": "2026-08-26T08:00:13.504963+00:00",
+    "django": "5.2.16",
+    "dataset": {
+      "properties": 1000,
+      "listings": 2000,
+      "tasks": 334,
+      "followups": 334,
+      "source": "seeded"
+    },
+    "runs": 5,
+    "method": "single user (admin), sequential requests through the Django test client (full middleware + DRF, no network); 1 warm-up run discarded per path"
+  },
+  "results": {
+    "properties-list-p1000": {
+      "status": 200,
+      "p50_ms": 559.24,
+      "p95_ms": 584.69,
+      "max_ms": 584.69,
+      "mean_ms": 558.88,
+      "payload_bytes_mean": 1362038,
+      "payload_bytes_max": 1362038,
+      "queries_mean": 15.0,
+      "queries_max": 15,
+      "db_ms_mean": 46.6
+    },
+    "properties-list-page1-p20": {
+      "status": 200,
+      "p50_ms": 44.49,
+      "p95_ms": 113.62,
+      "max_ms": 113.62,
+      "mean_ms": 58.17,
+      "payload_bytes_mean": 27365,
+      "payload_bytes_max": 27365,
+      "queries_mean": 15.0,
+      "queries_max": 15,
+      "db_ms_mean": 17.2
+    },
+    "properties-list-page50-p20": {
+      "status": 200,
+      "p50_ms": 43.71,
+      "p95_ms": 45.1,
+      "max_ms": 45.1,
+      "mean_ms": 44.19,
+      "payload_bytes_mean": 27214,
+      "payload_bytes_max": 27214,
+      "queries_mean": 15.0,
+      "queries_max": 15,
+      "db_ms_mean": 17.2
+    },
+    "properties-search-p20": {
+      "status": 200,
+      "p50_ms": 118.6,
+      "p95_ms": 161.8,
+      "max_ms": 161.8,
+      "mean_ms": 126.46,
+      "payload_bytes_mean": 26580,
+      "payload_bytes_max": 26580,
+      "queries_mean": 16.0,
+      "queries_max": 16,
+      "db_ms_mean": 83.6
+    },
+    "properties-detail": {
+      "status": 200,
+      "p50_ms": 29.76,
+      "p95_ms": 31.62,
+      "max_ms": 31.62,
+      "mean_ms": 29.46,
+      "payload_bytes_mean": 1305,
+      "payload_bytes_max": 1305,
+      "queries_mean": 14.0,
+      "queries_max": 14,
+      "db_ms_mean": 10.4
+    },
+    "listings-list-p1000": {
+      "status": 200,
+      "p50_ms": 6601.97,
+      "p95_ms": 6860.86,
+      "max_ms": 6860.86,
+      "mean_ms": 6644.95,
+      "payload_bytes_mean": 1170059,
+      "payload_bytes_max": 1170059,
+      "queries_mean": 8008.0,
+      "queries_max": 8008,
+      "db_ms_mean": 74.0
+    },
+    "listings-list-page1-p20": {
+      "status": 200,
+      "p50_ms": 149.83,
+      "p95_ms": 153.29,
+      "max_ms": 153.29,
+      "mean_ms": 148.48,
+      "payload_bytes_mean": 23500,
+      "payload_bytes_max": 23500,
+      "queries_mean": 168.0,
+      "queries_max": 168,
+      "db_ms_mean": 7.4
+    },
+    "listings-search-p20": {
+      "status": 200,
+      "p50_ms": 230.19,
+      "p95_ms": 249.0,
+      "max_ms": 249.0,
+      "mean_ms": 234.62,
+      "payload_bytes_mean": 23569,
+      "payload_bytes_max": 23569,
+      "queries_mean": 169.0,
+      "queries_max": 169,
+      "db_ms_mean": 85.8
+    },
+    "dashboard-analytics": {
+      "status": 200,
+      "p50_ms": 12361.73,
+      "p95_ms": 12767.29,
+      "max_ms": 12767.29,
+      "mean_ms": 12458.69,
+      "payload_bytes_mean": 2119,
+      "payload_bytes_max": 2119,
+      "queries_mean": 9000.0,
+      "queries_max": 9000,
+      "db_ms_mean": 31.0
+    },
+    "property-report": {
+      "status": 200,
+      "p50_ms": 37.55,
+      "p95_ms": 38.3,
+      "max_ms": 38.3,
+      "mean_ms": 37.68,
+      "payload_bytes_mean": 3251,
+      "payload_bytes_max": 3251,
+      "queries_mean": 19.0,
+      "queries_max": 19,
+      "db_ms_mean": 8.6
+    }
+  }
+}

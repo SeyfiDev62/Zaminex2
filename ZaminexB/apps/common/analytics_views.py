@@ -18,6 +18,8 @@ from apps.listings.models import Listing
 from apps.properties.models import Property
 from apps.tasks.models import Task
 
+from . import cache_utils
+
 from .metrics import (
     build_neighborhood_price_stats_map,
     channel_marketing_summary,
@@ -710,13 +712,74 @@ def _hot_property_rows(properties: list[dict]) -> list[dict]:
     return out
 
 
+def _located_property_rows(user, is_admin: bool) -> list[dict]:
+    """Every property with stored coordinates, role-scoped like the list API.
+
+    One query (properties ⋈ users) feeding the dashboard distribution maps:
+    admins see the whole system, consultants see own + shared — exactly the
+    scope the maps used to get from the 1000-row fetch. Rows carry only what
+    the maps render (marker position, label, colour inputs).
+    """
+    qs = Property.objects.filter(latitude__isnull=False, longitude__isnull=False)
+    if not is_admin:
+        qs = qs.filter(Q(consultant=user) | Q(is_shared=True))
+    rows = (
+        qs.values(
+            "id",
+            "title",
+            "latitude",
+            "longitude",
+            "status",
+            "area",
+            "consultant_id",
+            "consultant__first_name",
+            "consultant__last_name",
+            "consultant__username",
+        )
+        .order_by("-created_at")
+    )
+    out = []
+    for row in rows:
+        name = None
+        if row["consultant_id"]:
+            full = f"{row['consultant__first_name'] or ''} {row['consultant__last_name'] or ''}".strip()
+            name = full or row["consultant__username"]
+        out.append(
+            {
+                "id": row["id"],
+                "title": row["title"],
+                "latitude": row["latitude"],
+                "longitude": row["longitude"],
+                "propertyStatus": (row["status"] or "").lower(),
+                "area": row["area"],
+                "consultantId": row["consultant_id"],
+                "consultantName": name or "نامشخص",
+            }
+        )
+    return out
+
+
 class AnalyticsDashboardView(APIView):
     """Compact bundle for reports / admin dashboard widgets."""
 
     permission_classes = [IsAuthenticated]
 
+    # Phase 4: the bundle aggregates the heaviest reads in the app (the
+    # 9000-query analytics fan-out until Phase 4's query work lands). A
+    # short per-user TTL makes that cost pay at most once per user per TTL;
+    # signal invalidation (apps.common.cache_invalidation) drops the key the
+    # moment any of the underlying rows changes.
+    DASHBOARD_TTL = 60
+
     def get(self, request):
         user = request.user
+        key = cache_utils.make_key("dashboard", user.pk)
+        bundle = cache_utils.cache_or_compute(
+            key, lambda: self._bundle(user, request), self.DASHBOARD_TTL
+        )
+        return Response(bundle)
+
+    def _bundle(self, user, request) -> dict:
         is_admin = getattr(user, "role", "") == "ADMIN"
 
         consultant_view = ConsultantAnalyticsView()
@@ -762,23 +825,28 @@ class AnalyticsDashboardView(APIView):
 
         revenue_bundle = _get_monthly_revenue()
 
-        return Response(
-            {
-                "kpis": _dashboard_kpis(user),
-                "topConsultants": top_consultants,
-                "hotProperties": hot_properties,
-                "channelSummary": l_data.get("channels") or [],
-                "consultantCount": len(c_data.get("consultants") or []),
-                "propertyCount": len(p_data.get("properties") or []),
-                "listingCount": len(l_data.get("listings") or []),
-                # Backwards-compatible flat list (month, revenue, count, total,
-                # dealVolumes) plus the per-deal-type legend for the chart.
-                "revenueMonthly": revenue_bundle["months"],
-                "revenueDealTypes": revenue_bundle["dealTypes"],
-                "propertyComposition": _get_property_composition(composition_qs),
-                "myReport": my_report,
-            }
-        )
+        return {
+            "kpis": _dashboard_kpis(user),
+            "topConsultants": top_consultants,
+            "hotProperties": hot_properties,
+            "channelSummary": l_data.get("channels") or [],
+            "consultantCount": len(c_data.get("consultants") or []),
+            "propertyCount": len(p_data.get("properties") or []),
+            "listingCount": len(l_data.get("listings") or []),
+            # Backwards-compatible flat list (month, revenue, count, total,
+            # dealVolumes) plus the per-deal-type legend for the chart.
+            "revenueMonthly": revenue_bundle["months"],
+            "revenueDealTypes": revenue_bundle["dealTypes"],
+            "propertyComposition": _get_property_composition(composition_qs),
+            # Phase 1: the distribution maps' data source. The dashboards
+            # used to read these rows out of a page_size=1000 property
+            # fetch (silently truncated above 1000 rows); one role-scoped
+            # query here replaces it. Shape matches the slim list rows
+            # (propertyStatus/consultantId/consultantName) so the map
+            # components need no change.
+            "locatedProperties": _located_property_rows(user, is_admin),
+            "myReport": my_report,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -806,10 +874,14 @@ def _consultant_ai_data(profile) -> dict:
 def _property_ai_data(prop) -> dict:
     """Collect the analytics data sent to the AI for a property description."""
     from apps.common.metrics import property_market_metrics
-    from apps.reports.services import compute_property_report
+    from apps.reports.caching import cached_property_report
 
     market = property_market_metrics(prop)
-    report = compute_property_report(prop)
+    # Phase 4: the same shared report cache the JSON/CSV/PDF exports use —
+    # the prompt data stays consistent with what the screens show, and a
+    # cached report costs no recomputation (the description itself is
+    # fingerprint-cached on top of this).
+    report = cached_property_report(prop)
     charts = dict(report["charts"])
     charts.pop("engagementHeatmap", None)
     charts.pop("exposureTimeline", None)

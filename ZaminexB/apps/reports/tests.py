@@ -9,6 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import ConsultantProfile, UserRole
+from apps.common.models import ActivityLog
 from apps.followups.models import FollowUp
 from apps.listings.models import Listing
 from apps.properties.models import Property
@@ -245,3 +246,112 @@ class ReportsAPITests(TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["kpis"]["propertyCount"], 1)
+
+
+class PropertyReportPdfExportTests(TestCase):
+    """PDF export of the full property report.
+
+    Access: admins may export any property; consultants may only export the
+    properties they are assigned to or that are shared with them. Every
+    export must be recorded in the activity log like the CSV one.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="pdfadm", password="x" * 10, role=UserRole.ADMIN
+        )
+        self.agent = User.objects.create_user(
+            username="pdfag1", password="x" * 10, role=UserRole.AGENT,
+            first_name="Sara", last_name="A",
+        )
+        ConsultantProfile.objects.create(user=self.agent, full_name="Sara A", branch="B")
+        self.stranger = User.objects.create_user(
+            username="pdfag2", password="x" * 10, role=UserRole.AGENT
+        )
+        ConsultantProfile.objects.create(user=self.stranger, full_name="Ali B", branch="B")
+        self.prop = Property.objects.create(
+            title="Apt",
+            internal_code="P-1",
+            consultant=self.agent,
+            property_type=Property.PropertyType.APARTMENT,
+            deal_type=Property.DealType.SALE,
+            area=100,
+            rooms=2,
+            address="addr",
+            neighborhood="N",
+            latitude=Decimal("35.7"),
+            longitude=Decimal("51.4"),
+        )
+        self.shared = Property.objects.create(
+            title="Villa shared",
+            internal_code="P-2",
+            consultant=self.agent,
+            property_type=Property.PropertyType.VILLA,
+            deal_type=Property.DealType.SALE,
+            area=300,
+            address="addr2",
+            neighborhood="N2",
+            is_shared=True,
+        )
+
+    @property
+    def url(self):
+        return f"/api/reports/properties/{self.prop.pk}/export-pdf/"
+
+    def test_admin_can_export_pdf(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertIn("property-report-", res["Content-Disposition"])
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+        self.assertGreater(len(res.content), 1000)
+
+    def test_owner_consultant_can_export_pdf(self):
+        self.client.force_authenticate(user=self.agent)
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+
+    def test_shared_property_exportable_by_other_consultant(self):
+        self.client.force_authenticate(user=self.stranger)
+        res = self.client.get(f"/api/reports/properties/{self.shared.pk}/export-pdf/")
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+
+    def test_stranger_cannot_export_non_shared(self):
+        self.client.force_authenticate(user=self.stranger)
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 403)
+        self.assertFalse(
+            ActivityLog.objects.filter(
+                action=ActivityLog.ActionType.EXPORT,
+                target_type=ActivityLog.TargetType.PROPERTY,
+                target_id=self.prop.pk,
+            ).exists(),
+            "a denied export must not be logged",
+        )
+
+    def test_anonymous_cannot_export(self):
+        res = self.client.get(self.url)
+        self.assertIn(res.status_code, [401, 403])
+
+    def test_unknown_property_is_404(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get("/api/reports/properties/999999/export-pdf/")
+        self.assertEqual(res.status_code, 404)
+
+    def test_pdf_export_is_logged_in_activity(self):
+        self.client.force_authenticate(user=self.agent)
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 200)
+
+        entry = ActivityLog.objects.filter(
+            action=ActivityLog.ActionType.EXPORT,
+            target_type=ActivityLog.TargetType.PROPERTY,
+            target_id=self.prop.pk,
+        ).first()
+        self.assertIsNotNone(entry, "PDF export must be recorded in the activity log")
+        self.assertEqual(entry.user_id, self.agent.id)
+        self.assertEqual(entry.metadata.get("format"), "pdf")

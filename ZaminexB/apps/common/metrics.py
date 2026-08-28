@@ -213,6 +213,22 @@ def build_neighborhood_price_stats_map(
     return stats
 
 
+def cached_neighborhood_price_stats_map(ttl: int = 60) -> dict[str, dict[str, Any]]:
+    """The whole-DB neighbourhood stats map behind a short-TTL cache (Phase 4).
+
+    The property detail/report paths used to rebuild this map (a scan of all
+    active properties + one annotation query) on every request. It is pure
+    aggregate data — a 60 s refresh is imperceptible — and the cache's lock
+    keeps a cold-start herd to a single rebuild. Signal invalidation
+    (``apps.common.cache_invalidation``) drops the key when a property or
+    listing save changes the inputs, so the TTL is a backstop, not the norm.
+    """
+    from . import cache_utils
+
+    key = cache_utils.make_key("stats", "neighborhoods")
+    return cache_utils.cache_or_compute(key, build_neighborhood_price_stats_map, ttl)
+
+
 def price_deviation_index(
     property_obj: Property,
     neighborhood_stats: dict[str, dict[str, Any]] | None = None,

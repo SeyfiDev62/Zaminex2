@@ -85,16 +85,97 @@ export const IRAN_CITY_CENTERS: Record<string, LatLng> = {
 export const IRAN_DEFAULT_CENTER: LatLng = [35.6892, 53.0];
 export const IRAN_DEFAULT_ZOOM = 5;
 
+// ---------------------------------------------------------------------------
+//  Nominatim (OSM) geocoding — free, no key
+// ---------------------------------------------------------------------------
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Nominatim's usage policy allows ~1 request/second. The map picker can fire
+// several resolutions in a row (province → city → district), so every request
+// waits its turn and one 429 is retried once instead of failing the zoom.
+let lastNominatimAt = 0;
+
+async function nominatimFetch(url: string): Promise<Response> {
+  const wait = lastNominatimAt + 1100 - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastNominatimAt = Date.now();
+  let res = await fetch(url, { headers: { Accept: "application/json" } });
+  if (res.status === 429) {
+    await sleep(1600);
+    lastNominatimAt = Date.now();
+    res = await fetch(url, { headers: { Accept: "application/json" } });
+  }
+  return res;
+}
+
+/** Coarse bounding box around a known province centre, as Nominatim's
+ * `viewbox` parameter (west,north,east,south). Generous enough for Iran's
+ * large provinces; a place just outside still resolves via the unbounded
+ * follow-up below. */
+function provinceViewbox(provinceName?: string): string | null {
+  const c = provinceName ? IRAN_PROVINCE_CENTERS[provinceName.trim()] : null;
+  if (!c) return null;
+  const [lat, lng] = c;
+  const halfLat = 1.6;
+  const halfLng = 2.6;
+  return [
+    (lng - halfLng).toFixed(2),
+    (lat + halfLat).toFixed(2),
+    (lng + halfLng).toFixed(2),
+    (lat - halfLat).toFixed(2),
+  ].join(",");
+}
+
+async function nominatimSearch(
+  query: string,
+  viewbox: string | null
+): Promise<LatLng | null> {
+  try {
+    const build = (bounded: boolean) => {
+      const url = new URL("https://nominatim.openstreetmap.org/search");
+      url.searchParams.set("q", query);
+      url.searchParams.set("countrycodes", "ir");
+      url.searchParams.set("format", "jsonv2");
+      url.searchParams.set("limit", "1");
+      if (viewbox) {
+        url.searchParams.set("viewbox", viewbox);
+        if (bounded) url.searchParams.set("bounded", "1");
+      }
+      return url.toString();
+    };
+    for (const bounded of viewbox ? [true, false] : [false]) {
+      const res = await nominatimFetch(build(bounded));
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const lat = parseFloat(data[0].lat);
+        const lon = parseFloat(data[0].lon);
+        if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
+      }
+      if (!viewbox) break;
+    }
+  } catch {
+    // offline / blocked → fall through to null (caller uses parent center)
+  }
+  return null;
+}
+
 /**
- * Resolve a place name to coordinates for free.
- * 1. Checks the static Iran reference tables first (always available).
- * 2. Otherwise geocodes via Nominatim (OSM) — no key, no sign-up.
+ * Resolve a place name to coordinates.
  *
- * ``context`` scopes the lookup with the parent province / city. This matters
- * most for districts: a neighbourhood name like "گلستان" exists in many
- * cities, so searching the bare name returns an arbitrary match in another
- * province. Qualifying the query with the selected city and province makes
- * Nominatim resolve the exact selected neighbourhood.
+ * Accuracy rules (the map must land on *the* selected place, not a same-named
+ * one elsewhere):
+ *  - A **city** is always resolved against its selected province first
+ *    (Nominatim search qualified with the province and bounded to its
+ *    bounding box) — two provinces may contain cities with the same name,
+ *    and the static name-only table below is therefore only an offline
+ *    fallback, never the primary source when a province is selected.
+ *  - A **district** is resolved against city + province the same way; a
+ *    neighbourhood name like "گلستان" exists in many cities, so the
+ *    qualified, bounded query is what makes it resolve the exact one.
+ *  - A **province** uses the static centre table (already exact); the
+ *    geocoder only covers provinces that are not in the table yet.
  *
  * Returns null when nothing can be resolved.
  */
@@ -106,45 +187,32 @@ export async function resolvePlaceCoordinates(
   const clean = (name || "").trim();
   if (!clean) return null;
 
+  const province = context?.provinceName?.trim() || undefined;
+  const viewbox = provinceViewbox(province);
+
   if (kind === "province") {
     const c = IRAN_PROVINCE_CENTERS[clean];
     if (c) return c;
+    return nominatimSearch(clean, null);
   }
+
+  // Qualified query: most specific name first, then parent city and
+  // province, so a repeated name ranks its selected location first.
+  const parts = [clean];
+  if (kind === "district") {
+    const city = context?.cityName?.trim();
+    if (city) parts.push(city);
+  }
+  if (province) parts.push(province);
+
+  const resolved = await nominatimSearch(parts.join(", "), viewbox);
+  if (resolved) return resolved;
+
+  // Offline / not-found fallback: the static city table (name only — best
+  // effort when the geocoder is unreachable).
   if (kind === "city") {
     const c = IRAN_CITY_CENTERS[clean];
     if (c) return c;
-  }
-
-  try {
-    const url = new URL("https://nominatim.openstreetmap.org/search");
-    // Build a qualified query: most specific name first, then the parent
-    // city and province, so a repeated name resolves in the right place.
-    const query = [clean];
-    if (kind === "district") {
-      const city = context?.cityName?.trim();
-      const province = context?.provinceName?.trim();
-      if (city) query.push(city);
-      if (province) query.push(province);
-    } else if (kind === "city") {
-      const province = context?.provinceName?.trim();
-      if (province) query.push(province);
-    }
-    url.searchParams.set("q", query.join(", "));
-    url.searchParams.set("countrycodes", "ir");
-    url.searchParams.set("format", "jsonv2");
-    url.searchParams.set("limit", "1");
-    const res = await fetch(url.toString(), {
-      headers: { Accept: "application/json" },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (Array.isArray(data) && data.length > 0) {
-      const lat = parseFloat(data[0].lat);
-      const lon = parseFloat(data[0].lon);
-      if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-    }
-  } catch {
-    // offline / blocked → fall through to null (caller uses province center)
   }
   return null;
 }

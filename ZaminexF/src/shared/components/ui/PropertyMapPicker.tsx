@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from "react";
-import { MapContainer, TileLayer, Marker, useMap, useMapEvents } from "react-leaflet";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MapContainer, TileLayer, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Search, Crosshair, MapPin, Loader2 } from "lucide-react";
+import { Search, Crosshair, MapPin, Check, Loader2 } from "lucide-react";
 import {
   IRAN_DEFAULT_CENTER,
   IRAN_DEFAULT_ZOOM,
@@ -10,18 +10,23 @@ import {
   resolvePlaceCoordinates,
   type LatLng,
 } from "../../lib/iranLocations";
+import { apiFetch } from "../../lib/apiClient";
+import { consultantMarkerColor } from "../../lib/consultantColors";
+import {
+  makePinIcon,
+  PropertyMarkerPopupBody,
+} from "./PropertyMarkerPopup";
 
 // Leaflet's default marker icons don't resolve from bundlers; build one inline.
-const pinIcon = L.divIcon({
+const centerMarkerIcon = L.divIcon({
   className: "zaminex-map-pin",
-  html: `<div style="display:flex;align-items:center;justify-content:center;width:32px;height:32px;">
-           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#0BB68A" stroke-width="2.2">
-             <path d="M20 10c0 6-8 12-8 12S4 16 4 10a8 8 0 1 1 16 0Z"/>
-             <circle cx="12" cy="10" r="3" fill="#fff" stroke="#0BB68A"/>
-           </svg>
+  // The fixed selection marker: always rendered at the map centre, so it
+  // stays in the middle of the frame while the user drags the map around it.
+  html: `<div style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:9999px;background:rgba(255,255,255,0.96);border:3px solid #0BB68A;box-shadow:0 4px 10px rgba(0,0,0,0.28);">
+           <div style="width:9px;height:9px;border-radius:9999px;background:#0BB68A;"></div>
          </div>`,
-  iconSize: [32, 32],
-  iconAnchor: [16, 30],
+  iconSize: [30, 30],
+  iconAnchor: [15, 15],
 });
 
 function roundCoord(n: number): number {
@@ -29,6 +34,21 @@ function roundCoord(n: number): number {
   // floats (13+ digits) with a confusing "no more than 9 digits" error.
   return Number(n.toFixed(6));
 }
+
+function sameCoord(a: number, b: number): boolean {
+  return Math.abs(roundCoord(a) - roundCoord(b)) < 1e-9;
+}
+
+type LocatedProperty = {
+  id: number;
+  title: string;
+  lat: number;
+  lng: number;
+  status: string;
+  area: number;
+  consultantId: string | number | null;
+  consultantName: string;
+};
 
 /** Leaflet tiles and click coords drift inside RTL documents until the size is known. */
 function FitMapSize() {
@@ -40,36 +60,27 @@ function FitMapSize() {
   return null;
 }
 
-/** Click the map or drag the pin to choose / change the property location. */
-function ClickPicker({
-  value,
-  onChange,
-}: {
-  value: LatLng | null;
-  onChange: (p: LatLng) => void;
-}) {
-  useMapEvents({
-    click(e) {
-      onChange([roundCoord(e.latlng.lat), roundCoord(e.latlng.lng)]);
-    },
-  });
-  if (!value) return null;
-  return (
-    <Marker
-      position={value}
-      icon={pinIcon}
-      draggable
-      eventHandlers={{
-        dragend(e) {
-          const p = e.target.getLatLng();
-          onChange([roundCoord(p.lat), roundCoord(p.lng)]);
-        },
-      }}
-    />
-  );
+/** Reports the live map centre (the fixed marker position) on every move. */
+function CenterTracker({ onCenter }: { onCenter: (c: LatLng) => void }) {
+  const map = useMap();
+  const lastRef = useRef<LatLng | null>(null);
+  const report = useCallback(() => {
+    const c = map.getCenter();
+    const next: LatLng = [c.lat, c.lng];
+    const last = lastRef.current;
+    if (!last || Math.abs(last[0] - next[0]) > 1e-9 || Math.abs(last[1] - next[1]) > 1e-9) {
+      lastRef.current = next;
+      onCenter(next);
+    }
+  }, [map, onCenter]);
+  useMapEvents({ move: report, zoomend: report });
+  useEffect(() => {
+    report();
+  }, [report]);
+  return null;
 }
 
-/** Flying the camera to the resolved coordinates (province → city → district). */
+/** Flying the camera to a target (search results, district change, coord entry). */
 function FlyToLocation({
   location,
   zoom,
@@ -90,22 +101,90 @@ function PropertyMapPicker({
   provinceName,
   cityName,
   districtName,
+  csrfToken,
 }: {
+  /** The confirmed (registered) coordinates. */
   value: LatLng | null;
+  /** Called with the confirmed centre when the user taps «تایید موقعیت ملک». */
   onChange: (p: LatLng) => void;
   provinceName?: string;
   cityName?: string;
   districtName?: string;
+  csrfToken?: string;
 }) {
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [focusTarget, setFocusTarget] = useState<{ location: LatLng; zoom: number } | null>(null);
   const [searchNoResult, setSearchNoResult] = useState(false);
   const noResultTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // On edit the pin is already saved. Do not fly to the district centre on
+  // On edit the marker is already saved. Do not fly to the district centre on
   // first hydrate — that used to yank the camera off the real marker.
   const skipInitialFly = useRef(Boolean(value));
   const didHydrateLocation = useRef(false);
+
+  // Live map centre — the position of the fixed marker. The coordinates
+  // rendered under the map and the confirm-button state both follow this.
+  const [center, setCenter] = useState<LatLng>(value ?? IRAN_DEFAULT_CENTER);
+  const centerRef = useRef(center);
+  centerRef.current = center;
+  const onCenter = useCallback((c: LatLng) => setCenter(c), []);
+
+  // All located properties, drawn as consultant-coloured markers so the
+  // user can see the surroundings (and avoid registering on top of another
+  // property — the backend rejects exact duplicates as well).
+  // Phase 1: the list caps page_size at 100, so the "every located property"
+  // data is paged through in 100-row steps (same pattern as the combobox
+  // fetch in App.tsx).
+  const [located, setLocated] = useState<LocatedProperty[]>([]);
+  useEffect(() => {
+    if (!csrfToken) return;
+    let cancelled = false;
+    (async () => {
+      const rows: any[] = [];
+      let page = 1;
+      let total = Infinity;
+      try {
+        while (rows.length < total) {
+          const res = await apiFetch(
+            `/properties/api/properties/?scope=all&page=${page}&page_size=100`,
+            { method: "GET" },
+            csrfToken
+          );
+          if (!res.ok) break;
+          const data = await res.json();
+          if (Array.isArray(data)) {
+            rows.push(...data);
+            break;
+          }
+          const items = data.results ?? [];
+          total = data.count ?? items.length;
+          rows.push(...items);
+          if (items.length < 100) break;
+          page += 1;
+        }
+      } catch {
+        // surrounding properties are context only — never block the form.
+      }
+      if (cancelled) return;
+      setLocated(
+        rows
+          .filter((r) => r.latitude != null && r.longitude != null)
+          .map((r) => ({
+            id: r.id,
+            title: r.title || "ملک",
+            lat: Number(r.latitude),
+            lng: Number(r.longitude),
+            status: String(r.propertyStatus || "").toUpperCase(),
+            area: Number(r.area || 0),
+            consultantId: r.consultantId ?? null,
+            consultantName: r.consultantName || "نامشخص",
+          }))
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [csrfToken]);
 
   // Clear the pending "no result" timer on unmount so we never update state
   // on an unmounted component.
@@ -150,13 +229,38 @@ function PropertyMapPicker({
     };
   }, [provinceName, cityName, districtName]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // A coordinate entered in the form fields (or any external change of the
+  // confirmed value) moves the camera there so the fixed marker lands on it.
+  // A confirm coming from the map itself is skipped — the camera is already
+  // on that centre and re-flying would be a pointless hop.
+  const valueKey = value ? `${value[0].toFixed(6)},${value[1].toFixed(6)}` : "";
+  const prevValueKeyRef = useRef(valueKey);
+  useEffect(() => {
+    if (prevValueKeyRef.current === valueKey) return;
+    prevValueKeyRef.current = valueKey;
+    if (value) {
+      const c = centerRef.current;
+      if (Math.abs(value[0] - c[0]) > 1e-6 || Math.abs(value[1] - c[1]) > 1e-6) {
+        setFocusTarget({ location: value, zoom: 16 });
+      }
+    }
+  }, [valueKey, value]);
+
   const handleSearch = async () => {
     if (!q.trim()) return;
     if (noResultTimer.current) clearTimeout(noResultTimer.current);
     setSearchNoResult(false);
     setSearching(true);
     try {
-      const resolved = await resolvePlaceCoordinates(q.trim(), "district");
+      // Scope the search with the selected city/province: a neighbourhood
+      // name typed bare (e.g. «گلستان») exists in many cities, and the
+      // selected context is what makes it resolve the exact one. A place
+      // outside the province still resolves — the bounded search simply
+      // falls back to the unbounded one.
+      const resolved = await resolvePlaceCoordinates(q.trim(), "district", {
+        provinceName,
+        cityName,
+      });
       if (resolved) {
         setFocusTarget({ location: resolved, zoom: 15 });
         setQ("");
@@ -170,8 +274,33 @@ function PropertyMapPicker({
     }
   };
 
-  const center = value ?? focusTarget?.location ?? IRAN_DEFAULT_CENTER;
-  const zoom = focusTarget?.zoom ?? (value ? 15 : IRAN_DEFAULT_ZOOM);
+  const handleConfirmCenter = () => {
+    onChange([roundCoord(center[0]), roundCoord(center[1])]);
+  };
+
+  // The confirm button is visible while the marker (map centre) differs from
+  // the confirmed coordinates — including the create form before the first
+  // confirmation, where it is the only way to register a location.
+  const dirty =
+    !value || !sameCoord(center[0], value[0]) || !sameCoord(center[1], value[1]);
+
+  const initialCenter: LatLng = value ?? focusTarget?.location ?? IRAN_DEFAULT_CENTER;
+  const initialZoom = value ? 16 : focusTarget?.zoom ?? IRAN_DEFAULT_ZOOM;
+
+  const consultantIds = useMemo(() => located.map((p) => p.consultantId), [located]);
+  const iconCache = useRef(new Map<string, L.DivIcon>());
+  const iconFor = useCallback(
+    (p: LocatedProperty) => {
+      const color = consultantMarkerColor(p.consultantId, consultantIds);
+      let icon = iconCache.current.get(color);
+      if (!icon) {
+        icon = makePinIcon(color);
+        iconCache.current.set(color, icon);
+      }
+      return icon;
+    },
+    [consultantIds]
+  );
 
   return (
     <div className="space-y-2">
@@ -199,30 +328,57 @@ function PropertyMapPicker({
 
       <div className="isolate relative h-64 rounded-2xl overflow-hidden border border-border">
         <MapContainer
-          center={center}
-          zoom={zoom}
+          center={initialCenter}
+          zoom={initialZoom}
           scrollWheelZoom
           dragging
           doubleClickZoom
           touchZoom
           className="zaminex-map-picker"
-          style={{ height: "100%", width: "100%", cursor: "crosshair" }}
+          style={{ height: "100%", width: "100%", cursor: "grab" }}
         >
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
           <FitMapSize />
-          <ClickPicker value={value} onChange={onChange} />
-          <FlyToLocation location={focusTarget?.location ?? null} zoom={focusTarget?.zoom ?? zoom} />
+          <CenterTracker onCenter={onCenter} />
+          {located.map((p) => (
+            <Marker key={p.id} position={[p.lat, p.lng]} icon={iconFor(p)}>
+              <Popup closeButton={false} maxWidth={260} minWidth={220} className="zaminex-popup">
+                <PropertyMarkerPopupBody
+                  title={p.title}
+                  consultantName={p.consultantName}
+                  lat={p.lat}
+                  lng={p.lng}
+                  status={p.status}
+                  area={p.area}
+                />
+              </Popup>
+            </Marker>
+          ))}
+          <Marker position={center} icon={centerMarkerIcon} interactive={false} />
+          <FlyToLocation location={focusTarget?.location ?? null} zoom={focusTarget?.zoom ?? initialZoom} />
         </MapContainer>
+
+        {/* Live marker coordinates — update in real time while the map moves. */}
         <div className="pointer-events-none absolute bottom-2 left-2 bg-white/95 backdrop-blur rounded-lg px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm font-mono">
-          {value ? `${value[0].toFixed(6)}, ${value[1].toFixed(6)}` : "برای ثبت موقعیت روی نقشه کلیک کنید"}
+          {center[0].toFixed(6)}, {center[1].toFixed(6)}
         </div>
         {value && (
           <div className="pointer-events-none absolute top-2 right-2 bg-white/95 rounded-lg px-2 py-1 text-[11px] text-emerald-700 font-semibold flex items-center gap-1 shadow-sm">
             <MapPin size={11} />موقعیت ثبت شد
           </div>
+        )}
+        {dirty && (
+          <button
+            type="button"
+            onClick={handleConfirmCenter}
+            className="absolute bottom-2 right-2 z-[1000] flex items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-xs font-semibold text-white shadow-md hover:opacity-90 transition-opacity"
+          >
+            <Check size={13} />
+            تایید موقعیت ملک
+          </button>
         )}
         {searchNoResult && (
           <div className="absolute inset-0 z-[1001] flex items-center justify-center pointer-events-none">
@@ -234,13 +390,11 @@ function PropertyMapPicker({
       </div>
 
       <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
-        <span>کلیک روی نقشه برای انتخاب نقطه</span>
+        <span>کشیدن نقشه برای جابه‌جایی مارکر</span>
         <span>·</span>
-        <span>کشیدن پین برای جابه‌جایی دقیق</span>
+        <span>دکمه «تایید موقعیت ملک» برای ثبت نقطه</span>
         <span>·</span>
-        <span>دکمه‌های + و − برای زوم</span>
-        <span>·</span>
-        <span>کشیدن نقشه برای جابه‌جایی</span>
+        <span>کلیک روی پین‌های رنگی برای اطلاعات ملک</span>
       </div>
     </div>
   );

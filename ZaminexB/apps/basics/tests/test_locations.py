@@ -9,6 +9,7 @@ from django.test import TestCase
 
 from apps.basics.models import City, District, Province, PropertyType
 from apps.common.models import District as LegacyDistrict
+from apps.common.testing import CacheClearingMixin
 from apps.properties.models import Property
 
 User = get_user_model()
@@ -120,7 +121,7 @@ class NeighborhoodSyncTests(TestCase):
             self.district.delete(hard=True)
 
 
-class LocationAPITests(TestCase):
+class LocationAPITests(CacheClearingMixin, TestCase):
     @classmethod
     def setUpTestData(cls):
         cls.admin = User.objects.create_user(

@@ -117,6 +117,12 @@ type Property = {
   gradient?: string;
   description?: string;
   images?: { id: string | number; url: string; alt?: string }[];
+  /**
+   * First gallery photo, as sent by the slim LIST serializer (Phase 1).
+   * Detail responses carry the full `images` array instead — the card views
+   * prefer `imageUrl` and fall back to `images[0]` for detail-shaped rows.
+   */
+  imageUrl?: string | null;
   appraisalReport?: AppraisalReport | null;
   pricePerSqm?: number | null;
   imagesCount?: number;
@@ -222,7 +228,7 @@ type Listing = {
   title: string;
   description: string;
   status: "DRAFT" | "ACTIVE" | "PAUSED" | "EXPIRED" | "ARCHIVED";
-  publish_channel: "WEBSITE" | "INSTAGRAM" | "TELEGRAM" | "OTHER";
+  publishChannel: "WEBSITE" | "INSTAGRAM" | "TELEGRAM" | "OTHER";
   start_date: string | null;
   end_date: string | null;
   assigned_to: string | number | null;

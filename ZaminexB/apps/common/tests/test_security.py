@@ -47,10 +47,10 @@ class FollowUpAuthTests(TestCase):
 
     def test_anonymous_cannot_create_or_list_followups(self):
         client = APIClient()
-        listed = client.get("/followupa/api/followups/")
+        listed = client.get("/followups/api/followups/")
         self.assertIn(listed.status_code, (401, 403))
         created = client.post(
-            "/followupa/api/followups/",
+            "/followups/api/followups/",
             {
                 "title": "تماس",
                 "type": "Call",
@@ -68,7 +68,7 @@ class FollowUpAuthTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=self.agent)
         resp = client.post(
-            "/followupa/api/followups/",
+            "/followups/api/followups/",
             {
                 "title": "تماس",
                 "type": "Call",
@@ -87,7 +87,7 @@ class FollowUpAuthTests(TestCase):
         client = APIClient()
         client.force_authenticate(user=self.agent)
         resp = client.post(
-            "/followupa/api/followups/",
+            "/followups/api/followups/",
             {
                 "title": "تماس",
                 "type": "Call",

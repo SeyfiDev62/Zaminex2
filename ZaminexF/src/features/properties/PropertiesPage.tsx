@@ -352,11 +352,15 @@ function PropertiesPage({
                 description="با فیلترهای فعلی هیچ ملکی پیدا نشد. فیلترها را تغییر دهید یا ملک جدیدی اضافه کنید."
               />
             ) : (
-              paginated.map((p) => (
+              paginated.map((p) => {
+                // The list rows carry only the first photo (imageUrl); detail-shaped
+                // rows still have the full images array — accept either.
+                const cover = p.imageUrl || p.images?.[0]?.url;
+                return (
                 <Card key={p.id} hover onClick={() => openPropertyDetail(String(p.id))} className="overflow-hidden">
                   <div
-                    className={cx("h-36 relative flex items-end p-4", !p.images?.length && (p.gradient || "from-emerald-500 to-teal-600"))}
-                    style={p.images?.length ? { backgroundImage: `url(${p.images[0].url})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
+                    className={cx("h-36 relative flex items-end p-4", !cover && (p.gradient || "from-emerald-500 to-teal-600"))}
+                    style={cover ? { backgroundImage: `url(${cover})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
                   >
                     <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent" />
                     <div className="absolute top-3 left-3 flex gap-1.5 flex-wrap z-10">
@@ -393,7 +397,8 @@ function PropertiesPage({
                     </div>
                   </div>
                 </Card>
-              ))
+                );
+              })
             )}
           </div>
           {paginated.length > 0 && (

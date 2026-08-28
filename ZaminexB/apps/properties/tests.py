@@ -1,4 +1,5 @@
 import shutil
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
@@ -316,6 +317,44 @@ class PropertyOwnerFieldsApiTests(TestCase):
         data = resp.json()
         self.assertEqual(data["ownerFirstName"], "سارا")
         self.assertEqual(data["ownerPhone"], "09129998877")
+
+    def test_owner_phone_must_be_11_digits_starting_09(self):
+        for bad in ("0912123456", "19121234567", "091212345678", "09121234a67", ""):
+            resp = self.client.post(
+                "/properties/api/properties/",
+                {
+                    "title": "ملک موبایل نامعتبر",
+                    "type": "APARTMENT",
+                    "transactionType": "SALE",
+                    "area": 80,
+                    "fullAddress": "تهران",
+                    "ownerFirstName": "علی",
+                    "ownerLastName": "رضایی",
+                    "ownerPhone": bad,
+                },
+                format="json",
+            )
+            # Empty is rejected as missing; wrong formats as invalid.
+            self.assertEqual(resp.status_code, 400, f"{bad!r}: {resp.content[:300]}")
+            self.assertIn("owner_phone", resp.json())
+        self.assertEqual(Property.objects.filter(title="ملک موبایل نامعتبر").count(), 0)
+
+    def test_partial_update_without_phone_is_not_blocked(self):
+        prop = Property.objects.create(
+            title="ملک بدون موبایل",
+            internal_code="ZF_9302",
+            consultant=self.admin,
+            property_type="APARTMENT",
+            deal_type="SALE",
+            area=80,
+            address="تهران",
+        )
+        resp = self.client.patch(
+            f"/properties/api/properties/{prop.id}/",
+            {"title": "فقط تغییر عنوان"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content[:400])
 
 
 class PropertyScopeAllAccessTests(TestCase):
@@ -646,3 +685,181 @@ class PropertyAppraisalReportApiTests(TestCase):
         allowed = Client()
         allowed.force_login(self.owner)
         self.assertEqual(allowed.get(f"/media/{rel}").status_code, 200)
+
+
+class NextInternalCodePreviewTests(TestCase):
+    """The wizard's read-only «کد داخلی» field previews the exact code the
+    next property will be registered with.
+
+    The preview endpoint must run the same generator as ``Property.save`` so
+    the code shown in the form is the code that lands in the database, the
+    client can never override the code (the serializer field is read-only),
+    and the sequence rules (starts at ZF_1111, never contains a zero digit)
+    hold.
+    """
+
+    URL = "/properties/api/properties/next-internal-code/"
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="code-admin", password="pw", role="ADMIN"
+        )
+        self.agent = User.objects.create_user(
+            username="code-agent", password="pw", role="AGENT"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _preview(self, client=None):
+        resp = (client or self.client).get(self.URL)
+        self.assertEqual(resp.status_code, 200, resp.content[:400])
+        return resp.json()["internalCode"]
+
+    def test_first_code_is_start_of_sequence(self):
+        self.assertEqual(self._preview(), "ZF_1111")
+
+    def test_preview_matches_the_code_stored_on_save(self):
+        previewed = self._preview()
+        created = self.client.post(
+            "/properties/api/properties/",
+            {
+                "title": "ملک پیش‌نمایش کد",
+                "internalCode": "FORGED-1",  # client-provided: must be ignored
+                "type": "APARTMENT",
+                "transactionType": "SALE",
+                "area": 80,
+                "fullAddress": "ساری",
+                "ownerFirstName": "علی",
+                "ownerLastName": "رضایی",
+                "ownerPhone": "09121234567",
+            },
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201, created.content[:400])
+        self.assertEqual(created.json()["internalCode"], previewed)
+
+    def test_preview_advances_after_a_creation(self):
+        self._preview()
+        Property.objects.create(
+            title="ملک دوم",
+            internal_code="ZF_1111",
+            consultant=self.agent,
+            property_type="APARTMENT",
+            deal_type="SALE",
+            area=80,
+            address="ساری",
+        )
+        self.assertEqual(self._preview(), "ZF_1112")
+
+    def test_preview_skips_codes_containing_zero(self):
+        for code in ("ZF_1118", "ZF_1119"):
+            Property.objects.create(
+                title=f"ملک {code}",
+                internal_code=code,
+                consultant=self.agent,
+                property_type="APARTMENT",
+                deal_type="SALE",
+                area=80,
+                address="ساری",
+            )
+        self.assertEqual(self._preview(), "ZF_1121")
+
+    def test_agent_can_preview_too(self):
+        agent_client = APIClient()
+        agent_client.force_authenticate(user=self.agent)
+        self.assertEqual(self._preview(agent_client), "ZF_1111")
+
+    def test_anonymous_cannot_preview(self):
+        anon = APIClient()
+        resp = anon.get(self.URL)
+        self.assertEqual(resp.status_code, 403)
+
+
+class DuplicateLocationApiTests(TestCase):
+    """A property's coordinates must be unique across the system: two
+    properties registered at exactly the same location would overlap on
+    every map. The error must be a clear Persian message."""
+
+    BASE = {
+        "type": "APARTMENT",
+        "transactionType": "SALE",
+        "area": 80,
+        "fullAddress": "ساری، بلوار کشاورز",
+        "ownerFirstName": "علی",
+        "ownerLastName": "رضایی",
+        "ownerPhone": "09121234567",
+    }
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="duploc-admin", password="pw", role="ADMIN"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _create(self, **extra):
+        payload = {"title": "ملک موقعیت", **self.BASE, **extra}
+        return self.client.post("/properties/api/properties/", payload, format="json")
+
+    def test_duplicate_location_is_rejected_on_create(self):
+        first = self._create(title="ملک اول", latitude="36.563421", longitude="53.060112")
+        self.assertEqual(first.status_code, 201, first.content[:400])
+
+        second = self._create(title="ملک دوم", latitude="36.563421", longitude="53.060112")
+        self.assertEqual(second.status_code, 400, second.content[:400])
+        body = second.json()
+        # A clear Persian error naming the conflicting property.
+        message = " ".join(
+            item for v in body.values() if isinstance(v, list) for item in v
+        )
+        self.assertIn("یکی باشد", message)
+        self.assertIn("ملک اول", message)
+        self.assertEqual(Property.objects.count(), 1)
+
+    def test_different_locations_are_allowed(self):
+        first = self._create(title="ملک اول", latitude="36.563421", longitude="53.060112")
+        second = self._create(title="ملک دوم", latitude="36.563422", longitude="53.060112")
+        self.assertEqual(first.status_code, 201, first.content[:400])
+        self.assertEqual(second.status_code, 201, second.content[:400])
+        self.assertEqual(Property.objects.count(), 2)
+
+    def test_update_to_another_property_location_is_rejected(self):
+        first = self._create(title="ملک اول", latitude="36.563421", longitude="53.060112")
+        second = self._create(title="ملک دوم", latitude="35.689198", longitude="51.389973")
+        second_id = second.json()["id"]
+
+        moved = self.client.patch(
+            f"/properties/api/properties/{second_id}/",
+            {"latitude": "36.563421", "longitude": "53.060112"},
+            format="json",
+        )
+        self.assertEqual(moved.status_code, 400, moved.content[:400])
+        self.assertEqual(
+            Property.objects.get(pk=second_id).latitude, Decimal("35.689198")
+        )
+
+    def test_update_keeping_its_own_location_is_allowed(self):
+        created = self._create(title="ملک ثابت", latitude="36.563421", longitude="53.060112")
+        prop_id = created.json()["id"]
+
+        retitled = self.client.patch(
+            f"/properties/api/properties/{prop_id}/",
+            {
+                "title": "ملک ثابت (ویرایش‌شده)",
+                "latitude": "36.563421",
+                "longitude": "53.060112",
+            },
+            format="json",
+        )
+        self.assertEqual(retitled.status_code, 200, retitled.content[:400])
+
+    def test_update_without_coordinates_is_not_blocked(self):
+        created = self._create(title="ملک بدون موقعیت")
+        prop_id = created.json()["id"]
+
+        retitled = self.client.patch(
+            f"/properties/api/properties/{prop_id}/",
+            {"title": "بدون مختصات"},
+            format="json",
+        )
+        self.assertEqual(retitled.status_code, 200, retitled.content[:400])

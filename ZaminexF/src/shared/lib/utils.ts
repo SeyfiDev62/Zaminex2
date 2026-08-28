@@ -227,3 +227,96 @@ export function subscribeToToasts(listener: ToastListener) {
 export function toast(item: Omit<ToastItem, "id">) {
   toastListener?.(item);
 }
+
+// ---------------------------------------------------------------------------
+//  Geographic coordinate input (property create/edit forms)
+// ---------------------------------------------------------------------------
+
+/** Persian → Latin digits, common decimal separators, trim + de-space. */
+function normalizeCoordinateInput(raw: string): string {
+  return String(raw)
+    .trim()
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/٫|،|,/g, ".")
+    .replace(/\s+/g, "");
+}
+
+/** Parse one latitude/longitude field (Persian digits and separators ok). */
+export function parseCoordinate(raw: string | number | null | undefined): number | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  const cleaned = normalizeCoordinateInput(raw);
+  if (!cleaned) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Approximate bounding box of Iran — mirrors apps/common/metrics.py so an
+// obviously wrong coordinate is rejected client-side with a clear message.
+export const IRAN_LAT_RANGE: [number, number] = [25, 40];
+export const IRAN_LON_RANGE: [number, number] = [44, 64];
+
+export type CoordinateValidation =
+  | { state: "empty" }
+  | { state: "invalid"; error: string }
+  | { state: "valid"; value: [number, number] };
+
+/**
+ * Validate + normalize a (lat, lng) pair typed into the property form.
+ * Both empty → "empty" (location stays optional); otherwise a normalized
+ * pair rounded to the backend's 6 decimal places, or a Persian error.
+ */
+export function validateCoordinatePair(
+  latRaw: string | number | null | undefined,
+  lngRaw: string | number | null | undefined
+): CoordinateValidation {
+  const latText = String(latRaw ?? "").trim();
+  const lngText = String(lngRaw ?? "").trim();
+  if (!latText && !lngText) return { state: "empty" };
+
+  const lat = parseCoordinate(latText);
+  const lng = parseCoordinate(lngText);
+  if (lat === null || lng === null) {
+    return {
+      state: "invalid",
+      error: "عرض و طول جغرافیایی معتبر نیست؛ مختصات را به‌صورت عددی وارد کنید.",
+    };
+  }
+  if (
+    lat < IRAN_LAT_RANGE[0] ||
+    lat > IRAN_LAT_RANGE[1] ||
+    lng < IRAN_LON_RANGE[0] ||
+    lng > IRAN_LON_RANGE[1]
+  ) {
+    return {
+      state: "invalid",
+      error: "مختصات واردشده خارج از محدوده جغرافیایی ایران است؛ عرض باید بین ۲۵ تا ۴۰ و طول باید بین ۴۴ تا ۶۴ باشد.",
+    };
+  }
+  return { state: "valid", value: [Number(lat.toFixed(6)), Number(lng.toFixed(6))] };
+}
+
+// ---------------------------------------------------------------------------
+//  Owner mobile validation (property create/edit forms)
+// ---------------------------------------------------------------------------
+
+/** Persian digits → Latin, drop spaces/dashes — a clean 11-digit string. */
+export function normalizePhone(raw: string | number | null | undefined): string {
+  return String(raw ?? "")
+    .replace(/[۰-۹]/g, (d) => String("۰۱۲۳۴۵۶۷۸۹".indexOf(d)))
+    .replace(/[\s-]/g, "");
+}
+
+/**
+ * Persian error for an invalid owner mobile, or null when the value is fine.
+ * Empty input returns null — the required-field check owns that case.
+ * Rule: exactly 11 digits starting with 09 (09XXXXXXXXX).
+ */
+export function ownerPhoneError(raw: string | number | null | undefined): string | null {
+  const cleaned = normalizePhone(raw);
+  if (!cleaned) return null;
+  if (!/^09\d{9}$/.test(cleaned)) {
+    return "شماره موبایل مالک باید دقیقاً ۱۱ رقم و با ۰۹ شروع شود (مثال: 09121234567).";
+  }
+  return null;
+}

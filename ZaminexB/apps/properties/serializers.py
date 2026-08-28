@@ -1,3 +1,5 @@
+import re
+
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import serializers
@@ -10,7 +12,10 @@ from apps.basics.models import (
     PropertyUsage,
 )
 from apps.common.attribute_serializers import AttributeValuesMixin
-from apps.common.metrics import build_neighborhood_price_stats_map, property_market_metrics
+from apps.common.metrics import (
+    cached_neighborhood_price_stats_map,
+    property_market_metrics,
+)
 
 from .models import Property, PropertyAppraisalReport, PropertyAttributeValue, PropertyImage
 
@@ -252,7 +257,11 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
     def _market_metrics(self, obj):
         cache = getattr(self, "_neighborhood_avg_cache", None)
         if cache is None:
-            cache = build_neighborhood_price_stats_map()
+            # Phase 4: the neighbourhood price-stats map is shared (and
+            # short-TTL cached) across requests instead of being rebuilt per
+            # serializer instance; the instance attr memoises it within one
+            # response that serialises several properties.
+            cache = cached_neighborhood_price_stats_map()
             setattr(self, "_neighborhood_avg_cache", cache)
         if not hasattr(self, "_property_metrics_cache"):
             setattr(self, "_property_metrics_cache", {})
@@ -305,6 +314,20 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
             if missing:
                 raise serializers.ValidationError(missing)
 
+        # Owner mobile format (mirrors the form rule): exactly 11 digits
+        # starting with 09. Only enforced when a value is actually provided,
+        # so partial updates of other fields are never blocked.
+        phone = str(attrs.get("owner_phone") or "").strip()
+        if phone and not re.fullmatch(r"09\d{9}", phone):
+            raise serializers.ValidationError(
+                {
+                    "owner_phone": (
+                        "شماره موبایل مالک باید دقیقاً ۱۱ رقم و با ۰۹ شروع "
+                        "شود (مثال: 09121234567)."
+                    )
+                }
+            )
+
         # Consultants cannot change the consultant field on shared properties.
         request = self.context.get("request")
         if request and getattr(request.user, "role", "") != "ADMIN":
@@ -332,6 +355,30 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
             legacy = LEGACY_TYPE_BY_NAME.get(type_ref.name)
             if legacy:
                 attrs["property_type"] = legacy
+
+        # A property location must be unique across the system: two properties
+        # with exactly the same coordinates would overlap on every map (the
+        # create/edit map, the consultant detail map and the dashboard maps).
+        # The check applies to creates and to updates that change the location;
+        # re-saving a property with its own unchanged coordinates is allowed.
+        lat = attrs.get("latitude")
+        lng = attrs.get("longitude")
+        if lat is not None and lng is not None:
+            duplicates = Property.objects.filter(latitude=lat, longitude=lng)
+            if self.instance is not None:
+                duplicates = duplicates.exclude(pk=self.instance.pk)
+            duplicate = duplicates.first()
+            if duplicate is not None:
+                raise serializers.ValidationError(
+                    {
+                        "latitude": (
+                            f"این موقعیت قبلاً برای ملک «{duplicate.title}» "
+                            f"(کد {duplicate.internal_code}) ثبت شده است. "
+                            "موقعیت ملک نمی‌تواند با ملک دیگری یکی باشد؛ "
+                            "نقطهٔ دیگری روی نقشه انتخاب کنید یا مختصات دیگری وارد کنید."
+                        )
+                    }
+                )
 
         return attrs
 
@@ -366,3 +413,77 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
             instance, instance.property_type_ref, "attribute_links"
         )
         return instance
+
+
+# Fields the list serializer drops from the full payload. They are sized for
+# one property at a time (the detail page and the edit wizard) and multiply
+# ~12x on a 1000-row list for data no list screen renders:
+#   description / images / appraisalReport → detail + wizard only;
+#   attributes / attributeDetails → detail + wizard only;
+#   the market-metric block (pricePerSqm, priceDeviationIndex, daysOnMarket,
+#   engagement …) → computed per row for the detail page; the dashboards get
+#   their figures from the analytics endpoint. (``imagesCount`` is *kept*:
+#   the list spec is "imagesCount + first thumbnail instead of the full
+#   gallery" — and it is a cache read on the prefetched gallery, so it costs
+#   no query.)
+_PROPERTY_LIST_EXCLUDED = {
+    "description",
+    "images",
+    "appraisalReport",
+    "attributes",
+    "attributeDetails",
+    "pricePerSqm",
+    "daysOnMarket",
+    "spatialDensityRatio",
+    "priceDeviationIndex",
+    "geoPrecisionFlag",
+    "engagementHeatScore",
+    "views",
+}
+
+
+class PropertyListSerializer(PropertySerializer):
+    """Slim read-only serializer for list responses (Phase 1).
+
+    Keeps every field the list screens actually read — the card/table views,
+    the dashboard composition + distribution maps, the property comboboxes
+    and the add-listing wizard — and drops the detail-only payload described
+    above. ``imageUrl`` (the first gallery photo) replaces the whole
+    ``images`` array: the card views only ever render the first image.
+
+    Read-only by construction: it is only ever used for ``list`` responses,
+    so no write path can pick it up.
+    """
+
+    imageUrl = serializers.SerializerMethodField()
+
+    class Meta(PropertySerializer.Meta):
+        fields = [
+            field
+            for field in PropertySerializer.Meta.fields
+            if field not in _PROPERTY_LIST_EXCLUDED
+        ] + ["imageUrl"]
+
+    def get_imageUrl(self, obj):
+        """First gallery image (absolute URL) or ``None``.
+
+        The list view prefetched ``images``, so this never issues a query per
+        row; properties without photos simply get the gradient fallback on
+        the client.
+        """
+        request = self.context.get("request")
+        first_image = obj.images.first()
+        if first_image is not None and first_image.image:
+            url = first_image.image.url
+            return request.build_absolute_uri(url) if request else url
+        return None
+
+    def get_imagesCount(self, obj):
+        """Gallery size as a plain cache read.
+
+        The base implementation derives it through the market-metrics block
+        (which builds the neighbourhood price-stats map — detail-only work).
+        The list view prefetched ``images``, so counting the prefetched rows
+        is query-free.
+        """
+        return len(obj.images.all())

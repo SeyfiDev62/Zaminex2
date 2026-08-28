@@ -1,0 +1,416 @@
+"""Phase 1 — slim list serializer for the property list.
+
+Covers the contract the front-end list screens (admin property center, the
+consultant «ملک‌های من» / «همه املاک» tabs, dashboards, maps, comboboxes)
+rely on:
+
+* list responses carry the slim payload (no description / gallery / appraisal
+  report / dynamic attributes / market-metric block) plus ``imageUrl``;
+* detail responses are unchanged (full serializer);
+* the query count of a list request does NOT grow with the number of rows
+  (the N+1 guard the phase exists for);
+* the read-only ``scope=all`` list may be filtered by ``consultantId``
+  (the «همه املاک» tab needs it under server-side pagination) while the
+  scoped list keeps ignoring it.
+"""
+
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
+from django.db import connection
+from django.utils import timezone
+
+from rest_framework.test import APIClient
+
+from apps.accounts.models import User
+from apps.properties.models import Property, PropertyImage
+
+PNG_1x1 = (
+    b"89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    b"0000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082"
+)
+
+
+def _png_upload(name: str) -> SimpleUploadedFile:
+    return SimpleUploadedFile(name, PNG_1x1, content_type="image/png")
+
+
+def _make_property(consultant, **kwargs):
+    defaults = dict(
+        property_type="APARTMENT",
+        deal_type="SALE",
+        area=100,
+        address="تهران",
+    )
+    defaults.update(kwargs)
+    return Property.objects.create(
+        consultant=consultant, **defaults
+    )
+
+
+class PropertyListSerializerShapeTests(TestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="list-admin", password="pw", role="ADMIN"
+        )
+        self.agent = User.objects.create_user(
+            username="list-agent", password="pw", role="AGENT"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+        # Internal codes must use the ZF_ prefix: the model auto-generates a
+        # sequential code for anything else.
+        self.prop_with_image = _make_property(
+            self.agent,
+            title="آپارتمان با تصویر",
+            internal_code="ZF_1001",
+            description="توضیحات طولانی برای بررسی حذف شدن از پاسخ لیست",
+            latitude=35.7,
+            longitude=51.4,
+            owner_first_name="مالک",
+            owner_last_name="تست",
+            owner_phone="09121234567",
+        )
+        self.prop_no_image = _make_property(
+            self.agent,
+            title="ویلای بدون تصویر",
+            internal_code="ZF_1002",
+            property_type="VILLA",
+        )
+        self.other_prop = _make_property(
+            self.agent,
+            title="دفتر مرکزی",
+            internal_code="ZF_1003",
+        )
+        self.image = PropertyImage.objects.create(
+            property=self.prop_with_image, image=_png_upload("list-test.png")
+        )
+
+    # -- list shape ---------------------------------------------------------
+
+    def test_list_response_uses_the_slim_serializer(self):
+        res = self.client.get("/properties/api/properties/", {"page_size": 10})
+        self.assertEqual(res.status_code, 200)
+        row = next(
+            r for r in res.json()["results"] if r["id"] == self.prop_with_image.id
+        )
+
+        # Detail-only payload is gone from the list. (imagesCount is
+        # deliberately kept — it replaces the gallery array, see below.)
+        for field in (
+            "description",
+            "images",
+            "appraisalReport",
+            "attributes",
+            "attributeDetails",
+            "pricePerSqm",
+            "daysOnMarket",
+            "spatialDensityRatio",
+            "priceDeviationIndex",
+            "geoPrecisionFlag",
+            "engagementHeatScore",
+            "views",
+        ):
+            self.assertNotIn(field, row)
+
+        # Everything the list screens read is still there.
+        for field in (
+            "id",
+            "internalCode",
+            "title",
+            "type",
+            "propertyStatus",
+            "price",
+            "area",
+            "beds",
+            "district",
+            "consultant",
+            "consultantName",
+            "consultantId",
+            "locationPath",
+            "latitude",
+            "longitude",
+            "isShared",
+            "ownerFirstName",
+            "ownerLastName",
+            "ownerPhone",
+            "imageUrl",
+            # "imagesCount + first thumbnail" replaces the full gallery
+            # (Phase 1 spec) — a plain count, no per-row query.
+            "imagesCount",
+        ):
+            self.assertIn(field, row)
+
+    def test_images_count_is_a_plain_gallery_count(self):
+        res = self.client.get("/properties/api/properties/", {"page_size": 10})
+        rows = {r["id"]: r for r in res.json()["results"]}
+        self.assertEqual(rows[self.prop_with_image.id]["imagesCount"], 1)
+        self.assertEqual(rows[self.prop_no_image.id]["imagesCount"], 0)
+
+    def test_image_url_is_the_first_gallery_image(self):
+        res = self.client.get("/properties/api/properties/", {"page_size": 10})
+        rows = {r["id"]: r for r in res.json()["results"]}
+        # The serializer returns the absolute URL of the first image.
+        self.assertTrue(
+            rows[self.prop_with_image.id]["imageUrl"].endswith(self.image.image.url)
+        )
+        self.assertIsNone(rows[self.prop_no_image.id]["imageUrl"])
+
+    def test_detail_response_keeps_the_full_serializer(self):
+        res = self.client.get(f"/properties/api/properties/{self.prop_with_image.id}/")
+        self.assertEqual(res.status_code, 200)
+        row = res.json()
+        for field in (
+            "description",
+            "images",
+            "appraisalReport",
+            "attributes",
+            "attributeDetails",
+            "pricePerSqm",
+            "imagesCount",
+            "daysOnMarket",
+            "spatialDensityRatio",
+            "priceDeviationIndex",
+            "geoPrecisionFlag",
+            "engagementHeatScore",
+            "views",
+        ):
+            self.assertIn(field, row)
+        self.assertEqual(len(row["images"]), 1)
+
+    def test_create_and_update_responses_use_the_full_serializer(self):
+        res = self.client.post(
+            "/properties/api/properties/",
+            {
+                "title": "ملک جدید تست",
+                "internal_code": "ZF_1009",
+                "area": 90,
+                "address": "تهران",
+                "ownerFirstName": "مالک",
+                "ownerLastName": "جدید",
+                "ownerPhone": "09121112222",
+            },
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201)
+        self.assertIn("description", res.json())
+        self.assertIn("images", res.json())
+
+        prop = Property.objects.get(title="ملک جدید تست")
+        res = self.client.patch(
+            f"/properties/api/properties/{prop.id}/",
+            {"area": 95},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("description", res.json())
+
+    # -- pagination ---------------------------------------------------------
+
+    def test_list_is_paginated_with_total_count(self):
+        res = self.client.get("/properties/api/properties/", {"page_size": 2})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(len(data["results"]), 2)
+        self.assertEqual(data["count"], 3)
+
+        res = self.client.get("/properties/api/properties/", {"page": 2, "page_size": 2})
+        self.assertEqual(len(res.json()["results"]), 1)
+
+    def test_search_works_with_the_slim_serializer(self):
+        res = self.client.get(
+            "/properties/api/properties/", {"q": "آپارتمان", "page_size": 10}
+        )
+        self.assertEqual(res.status_code, 200)
+        rows = res.json()["results"]
+        self.assertIn(self.prop_with_image.id, [r["id"] for r in rows])
+        # The slim shape must survive the fuzzy-search code path too.
+        self.assertNotIn("description", rows[0])
+        self.assertIn("imageUrl", rows[0])
+
+
+class PropertyListQueryCountTests(TestCase):
+    """The list request must not run more queries as the dataset grows."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="qc-admin", password="pw", role="ADMIN"
+        )
+        self.agent = User.objects.create_user(
+            username="qc-agent", password="pw", role="AGENT"
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+
+    def _list_query_count(self, page_size):
+        with CaptureQueriesContext(connection) as ctx:
+            res = self.client.get(
+                "/properties/api/properties/", {"page_size": page_size}
+            )
+        self.assertEqual(res.status_code, 200)
+        return len(ctx.captured_queries)
+
+    def test_query_count_is_constant_regardless_of_rows(self):
+        # 5 rows …
+        for i in range(5):
+            _make_property(
+                self.agent,
+                title=f"ملک تست {i}",
+                internal_code=f"ZF_20{i:02d}",
+                description="توضیحات تست " * 5,
+            )
+        small = self._list_query_count(10)
+
+        # … and 45 rows (each with an image + a follow-up + a task: the
+        # relations the FULL serializer used to prefetch and serialise).
+        from apps.followups.models import FollowUp
+        from apps.tasks.models import Task
+
+        for i in range(5, 45):
+            prop = _make_property(
+                self.agent,
+                title=f"ملک تست {i}",
+                internal_code=f"ZF_20{i:02d}",
+                description="توضیحات تست " * 5,
+            )
+            PropertyImage.objects.create(property=prop, image=_png_upload(f"qc-{i}.png"))
+            FollowUp.objects.create(
+                title=f"پیگیری {i}",
+                follow_up_type="VIEWING",
+                consultant=self.agent,
+                property=prop,
+            )
+            Task.objects.create(
+                title=f"وظیفه {i}",
+                task_type="VIEWING",
+                status="PENDING",
+                priority="MEDIUM",
+                assigned_to=self.agent,
+                created_by=self.agent,
+                property=prop,
+                due_date=timezone.now().date(),
+            )
+
+        large = self._list_query_count(100)
+
+        self.assertLess(
+            large,
+            40,
+            "the 100-row list must run a small constant number of queries",
+        )
+        # And it must not grow with the dataset size.
+        self.assertLessEqual(large, small + 2)
+
+
+class PropertyListConsultantScopeAllFilterTests(TestCase):
+    """`consultantId` on the read-only scope=all list (Phase 1).
+
+    The consultant «همه املاک» tab is now server-side paginated, so its
+    consultant filter has to reach the endpoint. `scope=all` already exposes
+    every property to that consultant read-only; the filter only narrows it.
+    """
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            username="sa-admin", password="pw", role="ADMIN"
+        )
+        self.agent_a = User.objects.create_user(
+            username="sa-agent-a", password="pw", role="AGENT"
+        )
+        self.agent_b = User.objects.create_user(
+            username="sa-agent-b", password="pw", role="AGENT"
+        )
+        self.prop_a = _make_property(
+            self.agent_a, title="ملک مشاور الف", internal_code="ZF_3001"
+        )
+        self.prop_b = _make_property(
+            self.agent_b, title="ملک مشاور بی", internal_code="ZF_3002"
+        )
+
+    def test_consultant_scope_all_can_filter_by_consultant(self):
+        client = APIClient()
+        client.force_authenticate(user=self.agent_a)
+        res = client.get(
+            "/properties/api/properties/",
+            {"scope": "all", "consultantId": self.agent_b.id, "page_size": 10},
+        )
+        self.assertEqual(res.status_code, 200)
+        rows = res.json()["results"]
+        self.assertEqual([r["id"] for r in rows], [self.prop_b.id])
+
+    def test_consultant_without_scope_all_still_ignores_consultant_id(self):
+        # Without scope=all the list is already restricted to own + shared,
+        # and the consultant filter must not widen or change it.
+        client = APIClient()
+        client.force_authenticate(user=self.agent_a)
+        res = client.get(
+            "/properties/api/properties/",
+            {"consultantId": self.agent_b.id, "page_size": 10},
+        )
+        self.assertEqual(res.status_code, 200)
+        rows = res.json()["results"]
+        self.assertEqual([r["id"] for r in rows], [self.prop_a.id])
+
+    def test_admin_consultant_filter_still_works(self):
+        client = APIClient()
+        client.force_authenticate(user=self.admin)
+        res = client.get(
+            "/properties/api/properties/",
+            {"consultantId": self.agent_a.id, "page_size": 10},
+        )
+        self.assertEqual(res.status_code, 200)
+        rows = res.json()["results"]
+        self.assertEqual([r["id"] for r in rows], [self.prop_a.id])
+
+
+class PropertyListPageSizeGuardTests(TestCase):
+    """Phase 1 guard: ``max_page_size`` is capped at 100.
+
+    A legacy or accidental ``page_size=1000`` request must no longer be able
+    to drag a thousand serialized rows through one response — the server
+    answers 200 with at most 100 rows and the true ``count``.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from apps.listings.models import Listing
+
+        agent = User.objects.create_user(
+            username="guard-agent", password="pw", role="AGENT"
+        )
+        # 120 rows — enough to exceed the cap twice over. bulk_create keeps
+        # the test fast (signals are deliberately skipped).
+        Property.objects.bulk_create(
+            [
+                Property(
+                    title=f"ملک گارد {i}",
+                    internal_code=f"ZF_8{i:03d}",
+                    consultant=agent,
+                    property_type="APARTMENT",
+                    deal_type="SALE",
+                    area=90,
+                    address=f"آدرس {i}",
+                )
+                for i in range(120)
+            ]
+        )
+
+    def test_page_size_is_clamped_to_100(self):
+        client = APIClient()
+        admin = User.objects.create_user(
+            username="guard-admin", password="pw", role="ADMIN"
+        )
+        client.force_authenticate(user=admin)
+
+        res = client.get("/properties/api/properties/", {"page_size": 1000})
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(len(data["results"]), 100)
+        self.assertEqual(data["count"], 120)
+
+        # The next page reaches the remaining rows — nothing is lost.
+        res = client.get(
+            "/properties/api/properties/", {"page_size": 100, "page": 2}
+        )
+        self.assertEqual(len(res.json()["results"]), 20)

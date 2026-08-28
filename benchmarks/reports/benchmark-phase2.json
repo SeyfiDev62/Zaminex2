@@ -1,0 +1,151 @@
+{
+  "meta": {
+    "benchmark": "zaminex-phase2-after",
+    "generated_at": "2026-08-26T16:19:27.200579+00:00",
+    "django": "5.2.16",
+    "dataset": {
+      "properties": 1000,
+      "listings": 2000,
+      "tasks": 334,
+      "followups": 334,
+      "source": "seeded"
+    },
+    "runs": 5,
+    "method": "single user (admin), sequential requests through the Django test client (full middleware + DRF, no network); 1 warm-up run discarded per path",
+    "phase": "Phase 2 (Redis infrastructure): no consumer wired yet, so all paths are expected flat vs Phase 1 completion — confirmed (flat-to-faster on the same machine)."
+  },
+  "results": {
+    "properties-list-p1000": {
+      "status": 200,
+      "p50_ms": 47.29,
+      "p95_ms": 66.51,
+      "max_ms": 66.51,
+      "mean_ms": 51.19,
+      "payload_bytes_mean": 104461,
+      "payload_bytes_max": 104461,
+      "queries_mean": 10.0,
+      "queries_max": 10,
+      "db_ms_mean": 6.2
+    },
+    "properties-list-page1-p20": {
+      "status": 200,
+      "p50_ms": 20.22,
+      "p95_ms": 21.09,
+      "max_ms": 21.09,
+      "mean_ms": 20.44,
+      "payload_bytes_mean": 21003,
+      "payload_bytes_max": 21003,
+      "queries_mean": 10.0,
+      "queries_max": 10,
+      "db_ms_mean": 5.6
+    },
+    "properties-list-page50-p20": {
+      "status": 200,
+      "p50_ms": 20.26,
+      "p95_ms": 21.15,
+      "max_ms": 21.15,
+      "mean_ms": 20.37,
+      "payload_bytes_mean": 20971,
+      "payload_bytes_max": 20971,
+      "queries_mean": 10.0,
+      "queries_max": 10,
+      "db_ms_mean": 5.8
+    },
+    "properties-search-p20": {
+      "status": 200,
+      "p50_ms": 43.75,
+      "p95_ms": 44.53,
+      "max_ms": 44.53,
+      "mean_ms": 43.54,
+      "payload_bytes_mean": 21044,
+      "payload_bytes_max": 21044,
+      "queries_mean": 11.0,
+      "queries_max": 11,
+      "db_ms_mean": 23.0
+    },
+    "properties-detail": {
+      "status": 200,
+      "p50_ms": 23.74,
+      "p95_ms": 25.11,
+      "max_ms": 25.11,
+      "mean_ms": 24.07,
+      "payload_bytes_mean": 1304,
+      "payload_bytes_max": 1304,
+      "queries_mean": 14.0,
+      "queries_max": 14,
+      "db_ms_mean": 6.4
+    },
+    "listings-list-p1000": {
+      "status": 200,
+      "p50_ms": 52.74,
+      "p95_ms": 56.42,
+      "max_ms": 56.42,
+      "mean_ms": 53.75,
+      "payload_bytes_mean": 78926,
+      "payload_bytes_max": 78926,
+      "queries_mean": 12.0,
+      "queries_max": 12,
+      "db_ms_mean": 13.4
+    },
+    "listings-list-page1-p20": {
+      "status": 200,
+      "p50_ms": 32.62,
+      "p95_ms": 34.59,
+      "max_ms": 34.59,
+      "mean_ms": 32.85,
+      "payload_bytes_mean": 15884,
+      "payload_bytes_max": 15884,
+      "queries_mean": 12.0,
+      "queries_max": 12,
+      "db_ms_mean": 12.2
+    },
+    "listings-search-p20": {
+      "status": 200,
+      "p50_ms": 69.94,
+      "p95_ms": 72.11,
+      "max_ms": 72.11,
+      "mean_ms": 70.56,
+      "payload_bytes_mean": 15943,
+      "payload_bytes_max": 15943,
+      "queries_mean": 14.0,
+      "queries_max": 14,
+      "db_ms_mean": 43.8
+    },
+    "dashboard-analytics": {
+      "status": 200,
+      "p50_ms": 12559.67,
+      "p95_ms": 12815.56,
+      "max_ms": 12815.56,
+      "mean_ms": 12565.93,
+      "payload_bytes_mean": 218836,
+      "payload_bytes_max": 218836,
+      "queries_mean": 9000.0,
+      "queries_max": 9000,
+      "db_ms_mean": 29.4
+    },
+    "property-report": {
+      "status": 200,
+      "p50_ms": 38.32,
+      "p95_ms": 40.16,
+      "max_ms": 40.16,
+      "mean_ms": 38.73,
+      "payload_bytes_mean": 3243,
+      "payload_bytes_max": 3243,
+      "queries_mean": 19.0,
+      "queries_max": 19,
+      "db_ms_mean": 9.2
+    },
+    "properties-list-all-100loop": {
+      "status": 200,
+      "p50_ms": 557.29,
+      "p95_ms": 591.17,
+      "max_ms": 591.17,
+      "mean_ms": 564.1,
+      "payload_bytes_mean": 1054320,
+      "payload_bytes_max": 1054320,
+      "queries_mean": 110.0,
+      "queries_max": 110,
+      "db_ms_mean": 79.6
+    }
+  }
+}

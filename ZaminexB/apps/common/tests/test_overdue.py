@@ -207,7 +207,7 @@ class OverdueAPITests(TestCase):
             task_items = task_items.get("results", [])
         self.assertTrue(any(item.get("isOverdue") for item in task_items))
 
-        followups = self.client.get("/followupa/api/followups/")
+        followups = self.client.get("/followups/api/followups/")
         self.assertEqual(followups.status_code, 200)
         fu_items = followups.json()
         if isinstance(fu_items, dict):

@@ -3,7 +3,12 @@ from rest_framework import serializers
 
 from apps.basics.models import Attribute, DealType
 from apps.common.attribute_serializers import AttributeValuesMixin
-from apps.common.metrics import listing_marketing_metrics
+from apps.common.metrics import (
+    content_richness_score,
+    engagement_heat_score,
+    images_count_for_property,
+    listing_marketing_metrics,
+)
 from .models import Listing, ListingAttributeValue
 from apps.properties.models import Property
 from apps.accounts.models import User
@@ -14,10 +19,21 @@ class PropertyMiniSerializer(serializers.ModelSerializer):
     price = serializers.SerializerMethodField()
 
     def get_price(self, obj):
-        """Derived from the property's sale listings (see metrics)."""
-        from apps.common.metrics import effective_sale_price
+        """Derived from the property's sale listings (see metrics).
 
-        price = effective_sale_price(obj)
+        List responses carry a precomputed ``effective_price_map`` in the
+        serializer context (one query for the whole page, built by
+        ``ListingViewSet.get_serializer_context``) so serializing a row never
+        fires a per-row query. Detail responses fall back to the direct
+        derivation for the single property.
+        """
+        price_map = self.context.get("effective_price_map")
+        if price_map is not None:
+            price = price_map.get(obj.pk, obj.price)
+        else:
+            from apps.common.metrics import effective_sale_price
+
+            price = effective_sale_price(obj)
         return str(price) if price is not None else None
 
 
@@ -91,7 +107,13 @@ class ListingSerializer(AttributeValuesMixin, serializers.ModelSerializer):
     channels = serializers.SerializerMethodField()
     score = serializers.SerializerMethodField()
     views = serializers.SerializerMethodField()
-    publishChannel = serializers.CharField(source="publish_channel", read_only=True)
+    # Single wire name for the channel (camelCase, like the rest of the API).
+    # Writable + choice-validated on create/update; the model keeps its
+    # snake_case column via `source`.
+    publishChannel = serializers.ChoiceField(
+        choices=Listing.PublishChannel.choices,
+        source="publish_channel",
+    )
     effectiveExposureDays = serializers.SerializerMethodField()
     delegationIndicator = serializers.SerializerMethodField()
     isBurnedListing = serializers.SerializerMethodField()
@@ -102,7 +124,7 @@ class ListingSerializer(AttributeValuesMixin, serializers.ModelSerializer):
     class Meta:
         model = Listing
         fields = [
-            'id', 'title', 'description', 'status', 'publish_channel', 'publishChannel',
+            'id', 'title', 'description', 'status', 'publishChannel',
             'start_date', 'end_date', 'assigned_to', 'created_by',
             'priority', 'is_featured', 'created_at', 'updated_at',
             'property', 'property_detail', 'created_by_detail', 'assigned_to_detail',
@@ -185,3 +207,58 @@ class ListingSerializer(AttributeValuesMixin, serializers.ModelSerializer):
             instance, instance.deal_type, "attribute_links"
         )
         return instance
+
+
+# Fields the list serializer drops from the full payload (Phase 1). The full
+# serializer is sized for one listing at a time (the detail page and the edit
+# wizard); on a 1000-row list these fields also caused ~8 queries per row
+# (the per-row marketing metrics, the user profiles and the property price
+# derivation). What the list screens read stays:
+#   * the card/table columns (title, status, channels, dates, price fields,
+#     deal type, the property's title + first photo, the assigned consultant);
+#   * ``score`` and ``views`` — the two KPIs of the listings page. They are
+#     overridden below to compute from the relations the list view prefetches,
+#     so they cost zero queries per row.
+_LISTING_LIST_EXCLUDED = {
+    "description",
+    "attributes",
+    "attributeDetails",
+    "created_by_detail",
+    "priceDetails",
+    "effectiveExposureDays",
+    "delegationIndicator",
+    "isBurnedListing",
+    "generatedHighProbLeads",
+    "contentRichnessScore",
+    "engagementHeatScore",
+}
+
+
+class ListingListSerializer(ListingSerializer):
+    """Slim read-only serializer for list responses (Phase 1).
+
+    See ``_LISTING_LIST_EXCLUDED`` for the dropped fields. Read-only by
+    construction: it is only ever used for ``list`` responses, so no write
+    path can pick it up.
+    """
+
+    class Meta(ListingSerializer.Meta):
+        fields = [
+            field
+            for field in ListingSerializer.Meta.fields
+            if field not in _LISTING_LIST_EXCLUDED
+        ]
+
+    # The base implementation routes both KPIs through
+    # ``listing_marketing_metrics``, which also counts high-probability
+    # follow-ups — one query per row on a list. The list view prefetches
+    # ``property__images``, ``property__followups`` and ``property__tasks``,
+    # so compute the two KPIs straight from those cached relations instead.
+    def get_score(self, obj):
+        prop = obj.property
+        img_count = images_count_for_property(prop) if prop else 0
+        return int(round((content_richness_score(obj, img_count) / 5) * 100))
+
+    def get_views(self, obj):
+        prop = obj.property
+        return engagement_heat_score(prop) if prop else 0

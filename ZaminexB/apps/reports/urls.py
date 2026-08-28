@@ -4,6 +4,7 @@ from .views import (
     ConsultantScopeReportView,
     PropertyOptionsView,
     PropertyReportExportView,
+    PropertyReportPdfView,
     PropertyReportView,
 )
 
@@ -14,6 +15,11 @@ urlpatterns = [
         "api/reports/properties/<int:property_id>/export/",
         PropertyReportExportView.as_view(),
         name="property-report-export",
+    ),
+    path(
+        "api/reports/properties/<int:property_id>/export-pdf/",
+        PropertyReportPdfView.as_view(),
+        name="property-report-export-pdf",
     ),
     path(
         "api/reports/properties/<int:property_id>/",

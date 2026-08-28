@@ -12,6 +12,7 @@ import { EmptyState } from "../../../shared/components/ui/EmptyState";
 import { PageHeader } from "../../../shared/components/ui/PageHeader";
 import { apiFetch, readJson, apiErrorMessage, getCsrfToken } from "../../../shared/lib/apiClient";
 import { toast } from "../../../shared/lib/utils";
+import { ConfirmModal } from "../../../shared/components/ConfirmModal";
 import { Building2, LayoutDashboard, FileText, CheckSquare, Users, BarChart3, Settings, Bell, Search, LogOut, Plus, ChevronLeft, ChevronDown, ChevronRight, Clock, CheckCircle2, AlertCircle, MoreHorizontal, MapPin, Eye, Edit2, Trash2, Archive, Phone, Mail, Calendar, TrendingUp, Activity, Command, Star, List, LayoutGrid, Download, Shield, User, Lock, Key, RefreshCw, Circle, Zap, Target, Award, Upload, Check, AlertTriangle, Info, XCircle, Loader2, CircleCheck, TriangleAlert, Columns, Send, BellRing, X, ChevronUp, SlidersHorizontal, ArrowUpRight, Layers, MessageSquare, Sparkles, GripVertical, MoreVertical, Building, History, Flame, Image, Filter, SlidersVertical } from "lucide-react";
 import { AttributeCombobox } from "../../../shared/components/ui/AttributeCombobox";
 
@@ -113,8 +114,13 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     unit: "",
     filterType: "exact",
     isFacility: false,
+    searchable: true,
   });
   const [adding, setAdding] = useState(false);
+  // Native window.confirm has no branding and does not match the app; the
+  // destructive confirmations below use the shared ConfirmModal instead.
+  const [pendingDelete, setPendingDelete] = useState<Attribute | null>(null);
+  const [pendingUnbind, setPendingUnbind] = useState<Binding | null>(null);
 
   // --- bindings ---------------------------------------------------------
   const [propertyTypes, setPropertyTypes] = useState<TypeRow[]>([]);
@@ -129,7 +135,11 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
   const fetchAttributes = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await apiFetch("/basics/api/attributes/?all=1", { method: "GET" }, csrfToken);
+      // no-store: this list is the single source for both tabs (including the
+      // attribute picker in the bindings tab). A stale copy — from the browser
+      // or a corporate caching proxy — is exactly what made a just-created
+      // attribute "disappear" from both lists until a manual reload.
+      const res = await apiFetch("/basics/api/attributes/?all=1", { method: "GET", cache: "no-store" }, csrfToken);
       if (res.ok) setAttributes(await res.json());
     } catch {
       toast({ type: "error", message: "خطا در دریافت ویژگی‌ها" });
@@ -187,14 +197,27 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     if (!form.displayName.trim()) return;
     setAdding(true);
     try {
+      // «در جستجوها لحاظ شود» maps to the model's filter_type: unchecked
+      // attributes are stored as «بدون فیلتر», so the search-binding sync
+      // keeps them out of every search bar.
+      const { searchable, ...attributePayload } = form;
       const res = await apiFetch(
         "/basics/api/attributes/",
-        { method: "POST", body: JSON.stringify({ ...form, displayName: form.displayName.trim() }) },
+        { method: "POST", body: JSON.stringify({ ...attributePayload, filterType: searchable ? attributePayload.filterType : "none", displayName: form.displayName.trim() }) },
         csrfToken
       );
       if (res.ok) {
         toast({ type: "success", message: "ویژگی اضافه شد." });
-        setForm({ displayName: "", dataType: "text", entity: "property", unit: "", filterType: "exact", isFacility: false });
+        setForm({ displayName: "", dataType: "text", entity: "property", unit: "", filterType: "exact", isFacility: false, searchable: true });
+        // Show the new row the moment the server confirms it — do not rely on
+        // the following round trip alone, so the list and the bindings-tab
+        // picker update instantly even if the refetch is slow or cached.
+        const created = await res.json().catch(() => null);
+        if (created && created.id != null) {
+          setAttributes((prev) =>
+            prev.some((a) => a.id === created.id) ? prev : [...prev, created]
+          );
+        }
         await fetchAttributes();
       } else {
         const data = await res.json().catch(() => null);
@@ -223,11 +246,14 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   };
 
-  const handleDelete = async (row: Attribute) => {
-    const warning = row.usageCount
-      ? `«${row.displayName}» به ${row.usageCount.toLocaleString("fa-IR")} نوع متصل است. حذف شود؟`
-      : `آیا از حذف ویژگی «${row.displayName}» مطمئن هستید؟`;
-    if (!confirm(warning)) return;
+  const handleDelete = (row: Attribute) => {
+    setPendingDelete(row);
+  };
+
+  const confirmDelete = async () => {
+    const row = pendingDelete;
+    if (!row) return;
+    setPendingDelete(null);
     try {
       const res = await apiFetch(`/basics/api/attributes/${row.id}/`, { method: "DELETE" }, csrfToken);
       if (res.ok || res.status === 204) {
@@ -324,8 +350,14 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   };
 
-  const handleUnbind = async (row: Binding) => {
-    if (!confirm(`«${row.attributeDetail.displayName}» از این نوع حذف شود؟`)) return;
+  const handleUnbind = (row: Binding) => {
+    setPendingUnbind(row);
+  };
+
+  const confirmUnbind = async () => {
+    const row = pendingUnbind;
+    if (!row) return;
+    setPendingUnbind(null);
     const path = bindKind === "property"
       ? `/basics/api/property-type-attributes/${row.id}/`
       : `/basics/api/deal-type-attributes/${row.id}/`;
@@ -427,31 +459,53 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
                   ...p,
                   dataType: v,
                   isFacility: v === "boolean" ? p.isFacility : false,
-                  filterType: defaultFilterType(v),
+                  filterType: p.searchable ? defaultFilterType(v) : "none",
                 }))}
                 options={DATA_TYPES}
               />
             </div>
             <div className="grid grid-cols-3 gap-4 mt-4">
               <SelectField label="مربوط به" value={form.entity} onChange={(v) => setForm((p) => ({ ...p, entity: v }))} options={ENTITIES} />
-              <SelectField label="نوع فیلتر" value={form.filterType} onChange={(v) => setForm((p) => ({ ...p, filterType: v }))} options={FILTER_TYPES} />
+              <SelectField
+                label="نوع فیلتر"
+                value={form.filterType}
+                disabled={!form.searchable}
+                onChange={(v) => setForm((p) => ({ ...p, filterType: v, searchable: v !== "none" }))}
+                options={FILTER_TYPES}
+              />
               <Input label="واحد (اختیاری)" placeholder="مثال: متر مربع" value={form.unit} onChange={(v) => setForm((p) => ({ ...p, unit: v }))} />
             </div>
             <div className="flex items-center justify-between mt-4">
-              <label className="flex items-center gap-2.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.isFacility}
-                  onChange={(e) => {
-                    const on = e.target.checked;
-                    setForm((p) => on
-                      ? { ...p, isFacility: true, dataType: "boolean", filterType: "exists" }
-                      : { ...p, isFacility: false });
-                  }}
-                  className="w-4 h-4 rounded border-border accent-primary"
-                />
-                <span className="text-sm text-foreground">جزو امکانات رفاهی است</span>
-              </label>
+              <div className="flex items-center gap-6">
+                <label className="flex items-center gap-2.5 cursor-pointer" title="وقتی خاموش است، این ویژگی در فیلترهای جستجوی لیست‌ها ظاهر نمی‌شود.">
+                  <input
+                    type="checkbox"
+                    checked={form.searchable}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setForm((p) => on
+                        ? { ...p, searchable: true, filterType: p.filterType === "none" ? defaultFilterType(p.dataType) : p.filterType }
+                        : { ...p, searchable: false, filterType: "none" });
+                    }}
+                    className="w-4 h-4 rounded border-border accent-primary"
+                  />
+                  <span className="text-sm text-foreground">در جستجوها لحاظ شود</span>
+                </label>
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.isFacility}
+                    onChange={(e) => {
+                      const on = e.target.checked;
+                      setForm((p) => on
+                        ? { ...p, isFacility: true, dataType: "boolean", filterType: p.searchable ? "exists" : "none" }
+                        : { ...p, isFacility: false });
+                    }}
+                    className="w-4 h-4 rounded border-border accent-primary"
+                  />
+                  <span className="text-sm text-foreground">جزو امکانات رفاهی است</span>
+                </label>
+              </div>
               <Btn variant="primary" onClick={handleAdd} disabled={adding || !form.displayName.trim()}>
                 {adding ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
                 افزودن
@@ -681,6 +735,29 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
           </Card>
         </>
       )}
+
+      <ConfirmModal
+        open={pendingDelete !== null}
+        danger
+        title="حذف ویژگی؟"
+        message={
+          pendingDelete
+            ? pendingDelete.usageCount
+              ? `«${pendingDelete.displayName}» به ${pendingDelete.usageCount.toLocaleString("fa-IR")} نوع متصل است. با حذف آن، این وصل‌ها نیز برداشته می‌شوند.`
+              : `ویژگی «${pendingDelete.displayName}» برای همیشه حذف می‌شود. آیا مطمئن هستید؟`
+            : ""
+        }
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDelete(null)}
+      />
+      <ConfirmModal
+        open={pendingUnbind !== null}
+        danger
+        title="حذف اتصال؟"
+        message={pendingUnbind ? `«${pendingUnbind.attributeDetail.displayName}» از این نوع جدا می‌شود و دیگر در فرم آن نمایش داده نمی‌شود.` : ""}
+        onConfirm={confirmUnbind}
+        onCancel={() => setPendingUnbind(null)}
+      />
     </div>
   );
 }

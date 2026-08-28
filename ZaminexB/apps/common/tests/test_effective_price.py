@@ -329,7 +329,16 @@ class QueryCountTests(TestCase):
     def test_the_query_count_does_not_grow_with_the_number_of_rows(self):
         self.client.force_login(self.admin)
 
-        with self.assertNumQueries(15):
+        # Phase 1 constant, updated by Phase 6: auth + count + the page
+        # SELECT (select_related chain) + the list prefetches
+        # (images, listings, deal_type) + the session *write*
+        # (SAVEPOINT/UPDATE/RELEASE — the row is still persisted so a cache
+        # flush can never kill the session). Phase 6 (cached_db) removed the
+        # session *read* from the table — it is a cache hit here — so the
+        # count dropped 10 → 9. Before Phase 1 this was 15 — the full
+        # serializer also prefetched followups/tasks/attribute values and
+        # built the neighbourhood price-stats map.
+        with self.assertNumQueries(9):
             response = self.client.get("/properties/api/properties/")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["results"]), 6)
