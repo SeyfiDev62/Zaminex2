@@ -115,32 +115,32 @@ class ArchivedFollowUpDetailRouteTests(TestCase):
 
     def _archive(self):
         response = self.client.post(
-            f"/followupa/api/followups/{self.followup.pk}/archive/"
+            f"/followups/api/followups/{self.followup.pk}/archive/"
         )
         self.assertEqual(response.status_code, 200)
 
     def test_an_archived_followup_is_hidden_from_the_default_list(self):
         self._archive()
-        listed = self.client.get("/followupa/api/followups/").json()
+        listed = self.client.get("/followups/api/followups/").json()
         rows = listed["results"] if isinstance(listed, dict) else listed
         self.assertNotIn(self.followup.pk, [row["id"] for row in rows])
 
     def test_it_appears_in_the_archived_list(self):
         self._archive()
-        listed = self.client.get("/followupa/api/followups/?archived=true").json()
+        listed = self.client.get("/followups/api/followups/?archived=true").json()
         rows = listed["results"] if isinstance(listed, dict) else listed
         self.assertIn(self.followup.pk, [row["id"] for row in rows])
 
     def test_an_archived_followup_can_still_be_fetched(self):
         self._archive()
-        response = self.client.get(f"/followupa/api/followups/{self.followup.pk}/")
+        response = self.client.get(f"/followups/api/followups/{self.followup.pk}/")
         self.assertEqual(response.status_code, 200)
 
     def test_an_archived_followup_can_be_unarchived(self):
         """Otherwise archiving was a one-way trip."""
         self._archive()
         response = self.client.post(
-            f"/followupa/api/followups/{self.followup.pk}/unarchive/"
+            f"/followups/api/followups/{self.followup.pk}/unarchive/"
         )
         self.assertEqual(response.status_code, 200)
         self.followup.refresh_from_db()
@@ -149,5 +149,5 @@ class ArchivedFollowUpDetailRouteTests(TestCase):
     def test_an_archived_followup_can_be_deleted(self):
         """The bug: the delete button 404'd on anything archived."""
         self._archive()
-        response = self.client.delete(f"/followupa/api/followups/{self.followup.pk}/")
+        response = self.client.delete(f"/followups/api/followups/{self.followup.pk}/")
         self.assertEqual(response.status_code, 204)

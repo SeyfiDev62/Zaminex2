@@ -119,7 +119,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
     const fetchPropertyFollowups = async () => {
       setFollowupsLoading(true);
       try {
-        const res = await apiFetch(`/followupa/api/followups/?propertyId=${propertyId}`, { method: "GET" });
+        const res = await apiFetch(`/followups/api/followups/?propertyId=${propertyId}`, { method: "GET" });
         if (res.ok) {
           const data = await res.json();
           const items = Array.isArray(data) ? data : (data.results ?? []);

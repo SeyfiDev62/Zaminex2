@@ -38,7 +38,7 @@ class FollowUpEditApiTests(TestCase):
     def test_patch_updates_followup_fields(self):
         new_date = (timezone.now() + datetime.timedelta(days=2)).isoformat()
         resp = self.client.patch(
-            f"/followupa/api/followups/{self.followup.id}/",
+            f"/followups/api/followups/{self.followup.id}/",
             {
                 "title": "تماس پیگیری ویرایش‌شده",
                 "type": "Meeting",
@@ -66,7 +66,7 @@ class FollowUpEditApiTests(TestCase):
         agent_client = APIClient()
         agent_client.force_authenticate(user=self.agent)
         resp = agent_client.patch(
-            f"/followupa/api/followups/{self.followup.id}/",
+            f"/followups/api/followups/{self.followup.id}/",
             {"title": "ویرایش مشاور", "notes": "توسط مشاور"},
             format="json",
         )
@@ -82,7 +82,7 @@ class FollowUpEditApiTests(TestCase):
         self.followup.outcome = "نتیجه ثبت شد"
         self.followup.save()
         resp = self.client.patch(
-            f"/followupa/api/followups/{self.followup.id}/",
+            f"/followups/api/followups/{self.followup.id}/",
             {"title": "عنوان بعد از تکمیل", "notes": "فقط عنوان"},
             format="json",
         )
@@ -117,20 +117,20 @@ class FollowUpEditApiTests(TestCase):
             rows = payload["results"] if isinstance(payload, dict) else payload
             return [row["id"] for row in rows]
 
-        by_consultant = self.client.get(f"/followupa/api/followups/?consultantId={self.agent.id}")
+        by_consultant = self.client.get(f"/followups/api/followups/?consultantId={self.agent.id}")
         self.assertEqual(by_consultant.status_code, 200, by_consultant.content[:300])
         consultant_ids = _ids(by_consultant)
         self.assertIn(self.followup.id, consultant_ids)
         self.assertNotIn(other.id, consultant_ids)
 
-        by_property = self.client.get(f"/followupa/api/followups/?propertyId={self.prop.id}")
+        by_property = self.client.get(f"/followups/api/followups/?propertyId={self.prop.id}")
         self.assertEqual(by_property.status_code, 200, by_property.content[:300])
         property_ids = _ids(by_property)
         self.assertIn(self.followup.id, property_ids)
         self.assertNotIn(other.id, property_ids)
 
         both = self.client.get(
-            f"/followupa/api/followups/?consultantId={self.agent.id}&propertyId={self.prop.id}"
+            f"/followups/api/followups/?consultantId={self.agent.id}&propertyId={self.prop.id}"
         )
         self.assertEqual(both.status_code, 200)
         both_ids = _ids(both)
@@ -166,7 +166,7 @@ class FollowUpOrderingTests(TestCase):
         return followup
 
     def _list_ids(self, client, query=""):
-        resp = client.get(f"/followupa/api/followups/{query}")
+        resp = client.get(f"/followups/api/followups/{query}")
         self.assertEqual(resp.status_code, 200, resp.content[:300])
         payload = resp.json()
         rows = payload["results"] if isinstance(payload, dict) else payload
@@ -200,7 +200,7 @@ class FollowUpOrderingTests(TestCase):
 
         # Editing the older follow-up must re-order the list dynamically.
         resp = client.patch(
-            f"/followupa/api/followups/{first.id}/",
+            f"/followups/api/followups/{first.id}/",
             {"title": "اول (ویرایش‌شده)"},
             format="json",
         )
@@ -333,7 +333,7 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.client.force_authenticate(user=self.admin)
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?consultantId=%s&scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-18"
+                "/followups/api/followups/?consultantId=%s&scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-18"
                 % self.agent.id
             )
         )
@@ -348,7 +348,7 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.client.force_authenticate(user=self.admin)
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-16"
+                "/followups/api/followups/?scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-16"
             )
         )
         self.assertEqual(ids, {self.start_edge.id})
@@ -357,7 +357,7 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.client.force_authenticate(user=self.admin)
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?consultantId=%s&scheduledDateFrom=2026-07-18"
+                "/followups/api/followups/?consultantId=%s&scheduledDateFrom=2026-07-18"
                 % self.agent.id
             )
         )
@@ -367,7 +367,7 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.client.force_authenticate(user=self.admin)
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?consultantId=%s&scheduledDateTo=2026-07-16"
+                "/followups/api/followups/?consultantId=%s&scheduledDateTo=2026-07-16"
                 % self.agent.id
             )
         )
@@ -377,7 +377,7 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.client.force_authenticate(user=self.admin)
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?consultantId=%s&scheduledDateFrom=2026-08-01&scheduledDateTo=2026-08-02"
+                "/followups/api/followups/?consultantId=%s&scheduledDateFrom=2026-08-01&scheduledDateTo=2026-08-02"
                 % self.agent.id
             )
         )
@@ -390,7 +390,7 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.mid.save()
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?consultantId=%s&scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-18&type=Call"
+                "/followups/api/followups/?consultantId=%s&scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-18&type=Call"
                 % self.agent.id
             )
         )
@@ -400,7 +400,7 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.client.force_authenticate(user=self.agent)
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-18"
+                "/followups/api/followups/?scheduledDateFrom=2026-07-16&scheduledDateTo=2026-07-18"
             )
         )
         self.assertNotIn(self.other.id, ids)
@@ -413,21 +413,21 @@ class FollowUpScheduledDateRangeApiTests(TestCase):
         self.client.force_authenticate(user=self.stranger)
         ids = self._ids(
             self.client.get(
-                "/followupa/api/followups/?scheduledDateFrom=2026-07-01&scheduledDateTo=2026-07-31"
+                "/followups/api/followups/?scheduledDateFrom=2026-07-01&scheduledDateTo=2026-07-31"
             )
         )
         self.assertEqual(ids, {self.other.id})
 
     def test_invalid_date_returns_400(self):
         self.client.force_authenticate(user=self.admin)
-        resp = self.client.get("/followupa/api/followups/?scheduledDateFrom=not-a-date")
+        resp = self.client.get("/followups/api/followups/?scheduledDateFrom=not-a-date")
         self.assertEqual(resp.status_code, 400, resp.content)
         self.assertIn("scheduledDateFrom", resp.json())
 
     def test_reversed_range_returns_400(self):
         self.client.force_authenticate(user=self.admin)
         resp = self.client.get(
-            "/followupa/api/followups/?scheduledDateFrom=2026-07-20&scheduledDateTo=2026-07-18"
+            "/followups/api/followups/?scheduledDateFrom=2026-07-20&scheduledDateTo=2026-07-18"
         )
         self.assertEqual(resp.status_code, 400, resp.content)
         body = resp.json()

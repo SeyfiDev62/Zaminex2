@@ -457,7 +457,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
       // ordering (small table; LargeListPagination opt-in); the consultants
       // directory and the tasks summary are unchanged.
       const [fres, cres, tres, dashRes, actRes] = await Promise.allSettled([
-        apiFetch("/followupa/api/followups/", { method: "GET" }, initialData.csrfToken),
+        apiFetch("/followups/api/followups/", { method: "GET" }, initialData.csrfToken),
         apiFetch("/accounts/consultants/", { method: "GET" }, initialData.csrfToken),
         apiFetch("/tasks/api/tasks/summary/", { method: "GET" }, initialData.csrfToken),
         apiFetch("/common/api/analytics/dashboard/", { method: "GET" }, initialData.csrfToken),
@@ -561,7 +561,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     setFollowupsError(null);
 
     try {
-      const res = await apiFetch("/followupa/api/followups/", { method: "GET" }, initialData.csrfToken);
+      const res = await apiFetch("/followups/api/followups/", { method: "GET" }, initialData.csrfToken);
 
       if (!res.ok) throw new Error("خطا در دریافت پیگیری‌ها");
 
@@ -598,7 +598,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
       if (filters.scheduledDateFrom) params.set("scheduledDateFrom", filters.scheduledDateFrom);
       if (filters.scheduledDateTo) params.set("scheduledDateTo", filters.scheduledDateTo);
       const res = await apiFetch(
-        `/followupa/api/followups/?${params.toString()}`,
+        `/followups/api/followups/?${params.toString()}`,
         { method: "GET" },
         initialData.csrfToken
       );
@@ -617,7 +617,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     setFollowupsError(null);
 
     try {
-      const res = await apiFetch("/followupa/api/followups/", { method: "POST", body: JSON.stringify(payload) }, initialData.csrfToken);
+      const res = await apiFetch("/followups/api/followups/", { method: "POST", body: JSON.stringify(payload) }, initialData.csrfToken);
 
       if (!res.ok) {
         const data = await res.json().catch(() => null);
@@ -637,7 +637,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
 
   const archiveFollowup = useCallback(async (id: string) => {
     try {
-      const res = await apiFetch(`/followupa/api/followups/${id}/archive/`, { method: "POST" }, initialData.csrfToken);
+      const res = await apiFetch(`/followups/api/followups/${id}/archive/`, { method: "POST" }, initialData.csrfToken);
       if (!res.ok) throw new Error("خطا در بایگانی پیگیری");
       toast({ type: "success", message: "پیگیری بایگانی شد." });
       await fetchFollowups(); bumpFollowups();
@@ -648,7 +648,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
 
   const deleteFollowup = useCallback(async (id: string) => {
     try {
-      const res = await apiFetch(`/followupa/api/followups/${id}/`, { method: "DELETE" }, initialData.csrfToken);
+      const res = await apiFetch(`/followups/api/followups/${id}/`, { method: "DELETE" }, initialData.csrfToken);
       if (!res.ok) throw new Error("خطا در حذف پیگیری");
       toast({ type: "success", message: "پیگیری حذف شد." });
       await fetchFollowups(); bumpFollowups();
@@ -659,7 +659,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
 
   const completeFollowup = useCallback(async (id: string, outcome: string, probability: number) => {
     try {
-      const res = await apiFetch(`/followupa/api/followups/${id}/`, {
+      const res = await apiFetch(`/followups/api/followups/${id}/`, {
         method: "PATCH",
         body: JSON.stringify({ status: "completed", outcome, probability }),
       }, initialData.csrfToken);
@@ -675,7 +675,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     setFollowupsLoading(true);
     setFollowupsError(null);
     try {
-      const res = await apiFetch(`/followupa/api/followups/${id}/`, {
+      const res = await apiFetch(`/followups/api/followups/${id}/`, {
         method: "PATCH",
         body: JSON.stringify(payload),
       }, initialData.csrfToken);
@@ -734,7 +734,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     const controller = new AbortController();
     (async () => {
       try {
-        const res = await apiFetch(`/followupa/api/followups/${selectedFollowupId}/`, { method: "GET", signal: controller.signal }, initialData.csrfToken);
+        const res = await apiFetch(`/followups/api/followups/${selectedFollowupId}/`, { method: "GET", signal: controller.signal }, initialData.csrfToken);
         if (res.ok) {
           const data = await res.json();
           setSelectedFollowup(data);
