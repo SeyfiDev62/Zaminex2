@@ -413,3 +413,53 @@ dropped session `SELECT`.
 
 Full suite after Phase 6: 650 tests (644 + 6 new), failure set identical to
 the 50 pre-existing ones (0 new, 0 fixed).
+
+## Phase 7 gate evaluation — the future items are trigger-gated
+
+The roadmap defines Phase 7 as **conditional**: "فقط وقتی اعداد فاز ۰ بگوید
+لازم است" — each item has an explicit trigger, and nothing is to be built
+before its trigger fires. This section is the Phase 7 deliverable: every
+trigger measured with real numbers (report:
+`benchmarks/reports/benchmark-phase7-gate.json` — 10,000 seeded properties /
+20,000 listings, i.e. 10x the Phase 0 baseline, 5 runs) and an evidence-based
+verdict per item.
+
+| item | roadmap trigger | measured at 10x scale | verdict |
+|---|---|---|---|
+| keyset pagination for deep pages | OFFSET slowness on far pages (e.g. P95 page 100+) | page 500 (OFFSET 9980): p50 47.7 ms / **p95 51.4 ms**, 8 queries — flat vs page 1 (42.4 / 43.6 ms); no OFFSET degradation visible | **deferred** — no trigger at 10x |
+| partition/archive for ActivityLog | unbounded table growth + slow «این هفته» KPI | a 10k-property seed accumulates **46,699** log rows; the `created_at >= now() - 7 days` COUNT is an **index-only scan, 4.05 ms, 0 heap fetches**; the whole activity endpoint (3 COUNTs + 30 rows) answers in **~13 ms** | **deferred** — KPI still ~4 ms at 47k rows |
+| monitoring hit-rate + alert | "هر وقت Redis در production بود" | this environment runs the LocMem fallback (no `REDIS_URL`); there is no production Redis to monitor | **deferred** — activates with the deployment trigger |
+| ❌ cache `?q=` search results | never (user-specific + stale data = wrong business result) | still true by construction: Phase 5 caches only the COUNT integer; page rows are always a fresh `LIMIT/OFFSET` slice | **kept off** by design |
+
+### Deep-page detail (the keyset trigger, measured directly)
+
+| page (p20) | OFFSET | p50 ms | p95 ms | queries |
+|---:|---:|---:|---:|---:|
+| 1 | 0 | 42.4 | 43.6 | 8 |
+| 100 | 1,980 | 38.3 | 40.2 | 8 |
+| 250 | 4,980 | 49.8 | 70.7 | 8 |
+| 500 | 9,980 | 47.7 | 51.4 | 8 |
+
+At 10,000 rows the planner sorts the small table and `OFFSET` only skips
+within the ready run — so depth does not degrade (the one p95 blip on page
+250 is run-to-run noise, not a depth effect: page 500 is faster). The
+keyset-pagination payoff (avoiding the skip entirely) only appears once the
+table is large enough that producing the skipped rows dominates.
+
+### Revisit thresholds (when each item *should* be built)
+
+* **Keyset pagination**: re-measure with
+  `manage.py benchmark --props 100000 --deep-pages 100,250,500,1000` when the
+  properties table approaches ~100k rows, or now if a production report shows
+  deep-page P95 > ~200 ms. (The `--deep-pages` flag added in this phase is
+  the measurement tool — opt-in, standard reports unchanged.)
+* **ActivityLog archive/partition**: when the table approaches ~1M rows or
+  the «این هفته» COUNT leaves the single-digit-ms index-only regime
+  (currently 4.05 ms at 46.7k rows).
+* **Monitoring**: the moment a deployment sets `REDIS_URL` (the Phase-2
+  fail-open design makes that switch safe to observe behind the same
+  endpoints).
+
+Full suite after Phase 7: 650 tests, failure set identical to the 50
+pre-existing ones (0 new, 0 fixed) — the phase changes no request behaviour
+(benchmark tooling only, and a new report + this evaluation).

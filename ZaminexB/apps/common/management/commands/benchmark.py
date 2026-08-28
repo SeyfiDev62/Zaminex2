@@ -32,6 +32,8 @@ Usage
     manage.py benchmark --props 5000        # bigger dataset
     manage.py benchmark --skip-seed         # measure existing (real) data
     manage.py benchmark --runs 10 --out bench.json
+    manage.py benchmark --props 10000 --deep-pages 100,250,500
+                        # Phase 7 gate: OFFSET cost on far pages at scale
 """
 
 import json
@@ -107,6 +109,13 @@ class Command(BaseCommand):
         parser.add_argument(
             "--out", type=str, default=None,
             help="report path (default benchmarks/reports/benchmark-<ts>.json)",
+        )
+        parser.add_argument(
+            "--deep-pages", type=str, default="",
+            help="comma-separated property-list page numbers to add as "
+                 "deep-page paths — the Phase 7 keyset-pagination trigger "
+                 "data, e.g. '100,250,500' (the dataset must be large enough "
+                 "for the pages to exist)",
         )
 
     # ------------------------------------------------------------------ #
@@ -535,6 +544,15 @@ class Command(BaseCommand):
             "dashboard-analytics": "/common/api/analytics/dashboard/",
             "property-report": f"/api/reports/properties/{report_prop.pk}/",
         }
+        # Phase 7 gate: deep-page paths for the keyset-pagination trigger
+        # (OFFSET cost on far pages). Opt-in, so the standard reports keep
+        # their shape when the flag is not passed.
+        for raw in opts["deep_pages"].split(","):
+            raw = raw.strip()
+            if raw.isdigit():
+                paths[f"properties-list-page{raw}-p20"] = (
+                    f"/properties/api/properties/?page={raw}&page_size=20"
+                )
         # The "give me every row" production pattern after Phase 1: the
         # 100-row cap forces comboboxes/maps to page through the list.
         loop_paths = {
