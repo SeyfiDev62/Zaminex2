@@ -228,7 +228,7 @@ type Listing = {
   title: string;
   description: string;
   status: "DRAFT" | "ACTIVE" | "PAUSED" | "EXPIRED" | "ARCHIVED";
-  publish_channel: "WEBSITE" | "INSTAGRAM" | "TELEGRAM" | "OTHER";
+  publishChannel: "WEBSITE" | "INSTAGRAM" | "TELEGRAM" | "OTHER";
   start_date: string | null;
   end_date: string | null;
   assigned_to: string | number | null;

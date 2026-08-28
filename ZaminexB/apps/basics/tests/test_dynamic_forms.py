@@ -188,7 +188,7 @@ class ListingPricingTests(TestCase):
             {
                 "title": "فروش",
                 "property": self.property.pk,
-                "publish_channel": "WEBSITE",
+                "publishChannel": "WEBSITE",
                 "dealType": self.sale.pk,
                 "salePrice": 18_000_000_000,
             },
@@ -207,7 +207,7 @@ class ListingPricingTests(TestCase):
             {
                 "title": "رهن و اجاره",
                 "property": self.property.pk,
-                "publish_channel": "WEBSITE",
+                "publishChannel": "WEBSITE",
                 "dealType": self.rent.pk,
                 "deposit": 800_000_000,
                 "monthlyRent": 45_000_000,
@@ -227,14 +227,14 @@ class ListingPricingTests(TestCase):
             {
                 "title": "فروش",
                 "property": self.property.pk,
-                "publish_channel": "WEBSITE",
+                "publishChannel": "WEBSITE",
                 "dealType": self.sale.pk,
                 "salePrice": 18_000_000_000,
             },
             {
                 "title": "اجاره",
                 "property": self.property.pk,
-                "publish_channel": "WEBSITE",
+                "publishChannel": "WEBSITE",
                 "dealType": self.rent.pk,
                 "deposit": 800_000_000,
                 "monthlyRent": 45_000_000,
@@ -265,7 +265,7 @@ class ListingPricingTests(TestCase):
             {
                 "title": "با کمیسیون",
                 "property": self.property.pk,
-                "publish_channel": "WEBSITE",
+                "publishChannel": "WEBSITE",
                 "dealType": self.sale.pk,
                 "attributes": {"commission": "2.5"},
             },

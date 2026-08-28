@@ -107,7 +107,13 @@ class ListingSerializer(AttributeValuesMixin, serializers.ModelSerializer):
     channels = serializers.SerializerMethodField()
     score = serializers.SerializerMethodField()
     views = serializers.SerializerMethodField()
-    publishChannel = serializers.CharField(source="publish_channel", read_only=True)
+    # Single wire name for the channel (camelCase, like the rest of the API).
+    # Writable + choice-validated on create/update; the model keeps its
+    # snake_case column via `source`.
+    publishChannel = serializers.ChoiceField(
+        choices=Listing.PublishChannel.choices,
+        source="publish_channel",
+    )
     effectiveExposureDays = serializers.SerializerMethodField()
     delegationIndicator = serializers.SerializerMethodField()
     isBurnedListing = serializers.SerializerMethodField()
@@ -118,7 +124,7 @@ class ListingSerializer(AttributeValuesMixin, serializers.ModelSerializer):
     class Meta:
         model = Listing
         fields = [
-            'id', 'title', 'description', 'status', 'publish_channel', 'publishChannel',
+            'id', 'title', 'description', 'status', 'publishChannel',
             'start_date', 'end_date', 'assigned_to', 'created_by',
             'priority', 'is_featured', 'created_at', 'updated_at',
             'property', 'property_detail', 'created_by_detail', 'assigned_to_detail',
