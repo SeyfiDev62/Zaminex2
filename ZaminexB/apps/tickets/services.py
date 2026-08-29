@@ -14,7 +14,7 @@ from pathlib import Path
 from django.db import transaction
 from django.utils import timezone
 
-from apps.common.activity import log_activity
+from apps.activity.activity import log_activity
 from apps.common.models import Notification
 
 from .access import can_view_ticket

@@ -11,7 +11,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.common.models import ActivityLog
+from apps.activity.models import ActivityLog
 
 User = get_user_model()
 

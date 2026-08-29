@@ -80,8 +80,8 @@ class PropertyReportExportView(APIView):
         # Record the export in the activity log so it is auditable like any
         # other mutating action. The current user is picked up automatically
         # by ``log_activity`` via the thread-local request.
-        from apps.common.activity import log_activity
-        from apps.common.models import ActivityLog
+        from apps.activity.activity import log_activity
+        from apps.activity.models import ActivityLog
 
         title = report.get("property", {}).get("title") or f"ملک {pid}"
         log_activity(
@@ -171,8 +171,8 @@ class PropertyReportPdfView(APIView):
         report = cached_property_report(prop, filters=filters)
 
         # Record the export in the activity log, mirroring the CSV export.
-        from apps.common.activity import log_activity
-        from apps.common.models import ActivityLog
+        from apps.activity.activity import log_activity
+        from apps.activity.models import ActivityLog
 
         log_activity(
             user=request.user,

@@ -73,7 +73,7 @@ VERIFIED_MODELS = [
     "accounts.AdminProfile",
     "accounts.LoginAttempt",
     "common.District",
-    "common.ActivityLog",
+    "activity.ActivityLog",
     "common.CompanySettings",
     "common.Notification",
     "properties.Property",

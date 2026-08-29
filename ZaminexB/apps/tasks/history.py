@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from django.contrib.auth import get_user_model
 
-from apps.common.models import ActivityLog
+from apps.activity.models import ActivityLog
 
 
 STATUS_FA = {

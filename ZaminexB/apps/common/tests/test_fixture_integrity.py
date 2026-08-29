@@ -18,7 +18,7 @@ from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase
 
-from apps.common.models import ActivityLog
+from apps.activity.models import ActivityLog
 from apps.properties.models import Property
 
 User = get_user_model()

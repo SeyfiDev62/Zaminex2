@@ -9,7 +9,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import ConsultantProfile, UserRole
-from apps.common.models import ActivityLog
+from apps.activity.models import ActivityLog
 from apps.followups.models import FollowUp
 from apps.listings.models import Listing
 from apps.properties.models import Property
@@ -224,7 +224,7 @@ class ReportsAPITests(TestCase):
         self.assertIn("شناسه ملک", rows[0])
 
     def test_csv_export_is_logged_in_activity(self):
-        from apps.common.models import ActivityLog
+        from apps.activity.models import ActivityLog
 
         self.client.force_authenticate(user=self.agent)
         url = f"/api/reports/properties/{self.prop.pk}/export/"

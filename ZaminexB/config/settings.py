@@ -81,6 +81,7 @@ INSTALLED_APPS = [
     'apps.tickets.apps.TicketsConfig',
     'apps.reports.apps.ReportsConfig',
     'apps.analytics.apps.AnalyticsConfig',
+    'apps.activity.apps.ActivityConfig',
     'rest_framework',
 ]
 

@@ -433,7 +433,7 @@ def _charts_section(story, styles, charts: dict) -> None:
 def _logs_section(story, styles, prop) -> None:
     from django.db.models import Q
 
-    from apps.common.models import ActivityLog
+    from apps.activity.models import ActivityLog
 
     _section_header(story, styles, "۶. سابقه و لاگ‌های ملک")
     listing_ids = list(prop.listings.values_list("id", flat=True))

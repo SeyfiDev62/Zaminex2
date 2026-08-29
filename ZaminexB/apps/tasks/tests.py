@@ -5,7 +5,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.accounts.models import UserRole
-from apps.common.models import ActivityLog
+from apps.activity.models import ActivityLog
 from apps.common.thread_locals import clear_current_user, set_current_user
 from apps.tasks.history import task_history_items
 from apps.tasks.models import Task
