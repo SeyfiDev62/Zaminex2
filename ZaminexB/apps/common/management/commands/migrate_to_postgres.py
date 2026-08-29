@@ -75,7 +75,7 @@ VERIFIED_MODELS = [
     "common.District",
     "activity.ActivityLog",
     "common.CompanySettings",
-    "common.Notification",
+    "notifications.Notification",
     "properties.Property",
     "properties.PropertyImage",
     "listings.Listing",

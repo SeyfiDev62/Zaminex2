@@ -9,13 +9,12 @@ from apps.analytics.views import (
     ListingAnalyticsView,
     PropertyAnalyticsView,
 )
+from apps.notifications.views import NotificationListView, NotificationMarkReadView
 from .views import (
     CompanySettingsView,
     DistrictListView,
     DistrictManageView,
     LoginStatsView,
-    NotificationListView,
-    NotificationMarkReadView,
     PasswordResetRequestView,
     AdminPasswordChangeView,
 )

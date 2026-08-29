@@ -15,7 +15,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.activity.activity import log_activity
-from apps.common.models import Notification
+from apps.notifications.models import Notification
 
 from .access import can_view_ticket
 from .models import (

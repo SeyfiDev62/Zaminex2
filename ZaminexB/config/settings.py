@@ -82,6 +82,7 @@ INSTALLED_APPS = [
     'apps.reports.apps.ReportsConfig',
     'apps.analytics.apps.AnalyticsConfig',
     'apps.activity.apps.ActivityConfig',
+    'apps.notifications.apps.NotificationsConfig',
     'rest_framework',
 ]
 
