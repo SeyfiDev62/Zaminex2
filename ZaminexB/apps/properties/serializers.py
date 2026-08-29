@@ -12,7 +12,7 @@ from apps.basics.models import (
     PropertyUsage,
 )
 from apps.common.attribute_serializers import AttributeValuesMixin
-from apps.common.metrics import (
+from apps.analytics.metrics import (
     cached_neighborhood_price_stats_map,
     property_market_metrics,
 )
@@ -230,7 +230,7 @@ class PropertySerializer(AttributeValuesMixin, serializers.ModelSerializer):
 
     def get_price(self, obj):
         """The headline sale price, derived from the property's listings."""
-        from apps.common.metrics import effective_sale_price
+        from apps.analytics.metrics import effective_sale_price
 
         price = effective_sale_price(obj)
         return str(price) if price is not None else None

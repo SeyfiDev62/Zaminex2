@@ -31,8 +31,10 @@ from typing import Any
 from django.conf import settings
 from django.utils import timezone
 
-from . import cache_utils
-from .models import AIInsightCache, CompanySettings
+from apps.common import cache_utils
+from apps.common.models import CompanySettings
+
+from .models import AIInsightCache
 
 # Cache TTL for generated descriptions (seconds). Even if the underlying data
 # did not change, we refresh the description at least once per period so it does
@@ -127,7 +129,7 @@ def build_property_prompt(property_data: dict[str, Any]) -> str:
 
 def _urlopen(req, timeout):
     """Open the AI request and refuse redirects that leave the public HTTPS web."""
-    from apps.common.ai_url import UnsafeAIURL, assert_public_https_url
+    from apps.analytics.ai_url import UnsafeAIURL, assert_public_https_url
 
     class _SafeRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -144,7 +146,7 @@ def _urlopen(req, timeout):
 def _chat_completion(system: str, user: str) -> str:
     """Call an OpenAI-compatible chat/completions endpoint and return the text."""
     s = ai_config()
-    from apps.common.ai_url import UnsafeAIURL, assert_public_https_url
+    from apps.analytics.ai_url import UnsafeAIURL, assert_public_https_url
 
     try:
         base_url = assert_public_https_url(s.ai_api_base_url)

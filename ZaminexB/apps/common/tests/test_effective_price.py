@@ -14,7 +14,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.basics.models import DealType, PropertyType
-from apps.common.metrics import (
+from apps.analytics.metrics import (
     annotate_effective_prices,
     build_neighborhood_price_per_sqm_map,
     effective_sale_price,

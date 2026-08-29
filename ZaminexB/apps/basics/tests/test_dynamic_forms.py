@@ -398,7 +398,7 @@ class NullPriceRobustnessTests(TestCase):
 
     def test_the_neighbourhood_average_ignores_properties_without_a_price(self):
         """Treating a missing price as zero would halve the average."""
-        from apps.common.metrics import build_neighborhood_price_per_sqm_map
+        from apps.analytics.metrics import build_neighborhood_price_per_sqm_map
 
         averages = build_neighborhood_price_per_sqm_map()
         self.assertEqual(averages["مشترک"], 10_000_000)

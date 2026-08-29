@@ -23,7 +23,7 @@ from django.test.utils import CaptureQueriesContext
 
 from apps.accounts.models import ConsultantProfile, User, UserRole
 from apps.common import cache_utils
-from apps.common.metrics import (
+from apps.analytics.metrics import (
     build_neighborhood_price_stats_map,
     cached_neighborhood_price_stats_map,
 )
@@ -240,7 +240,7 @@ class ScopeReportCacheTests(Phase4Base):
 class StatsMapCacheTests(Phase4Base):
     def test_second_read_is_a_cache_hit(self):
         with mock.patch(
-            "apps.common.metrics.build_neighborhood_price_stats_map",
+            "apps.analytics.metrics.build_neighborhood_price_stats_map",
             wraps=build_neighborhood_price_stats_map,
         ) as m:
             s1 = cached_neighborhood_price_stats_map()
@@ -251,7 +251,7 @@ class StatsMapCacheTests(Phase4Base):
 
     def test_listing_save_invalidates(self):
         with mock.patch(
-            "apps.common.metrics.build_neighborhood_price_stats_map",
+            "apps.analytics.metrics.build_neighborhood_price_stats_map",
             wraps=build_neighborhood_price_stats_map,
         ) as m:
             cached_neighborhood_price_stats_map()
@@ -262,7 +262,7 @@ class StatsMapCacheTests(Phase4Base):
 
     def test_property_save_invalidates(self):
         with mock.patch(
-            "apps.common.metrics.build_neighborhood_price_stats_map",
+            "apps.analytics.metrics.build_neighborhood_price_stats_map",
             wraps=build_neighborhood_price_stats_map,
         ) as m:
             cached_neighborhood_price_stats_map()
@@ -272,7 +272,7 @@ class StatsMapCacheTests(Phase4Base):
 
     def test_fail_open_with_dead_cache(self):
         with mock.patch(
-            "apps.common.metrics.build_neighborhood_price_stats_map",
+            "apps.analytics.metrics.build_neighborhood_price_stats_map",
             wraps=build_neighborhood_price_stats_map,
         ) as m, mock.patch.object(
             cache_utils, "_cache", return_value=_DeadCache()

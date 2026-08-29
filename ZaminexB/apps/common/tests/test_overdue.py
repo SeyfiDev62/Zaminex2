@@ -6,8 +6,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import ConsultantProfile, UserRole
-from apps.common.analytics_views import consultant_detail_report
-from apps.common.metrics import (
+from apps.analytics.views import consultant_detail_report
+from apps.analytics.metrics import (
     consultant_followups_overdue_count,
     consultant_performance_metrics,
     consultant_tasks_overdue_count,

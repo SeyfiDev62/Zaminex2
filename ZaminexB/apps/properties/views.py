@@ -13,7 +13,7 @@ from django.views.decorators.csrf import ensure_csrf_cookie
 from apps.basics.models import Attribute
 from apps.common.attribute_filters import apply_attribute_filters
 from apps.common.fuzzy_search import apply_fuzzy_search
-from apps.common.metrics import annotate_effective_prices, effective_sale_price as _sale_price
+from apps.analytics.metrics import annotate_effective_prices, effective_sale_price as _sale_price
 
 from .permissions import consultant_required
 from .models import (

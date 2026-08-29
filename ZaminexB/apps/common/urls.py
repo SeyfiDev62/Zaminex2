@@ -1,7 +1,7 @@
 from django.urls import path
 
 from .activity_views import ActivityLogListView, ActivityLogUserListView
-from .analytics_views import (
+from apps.analytics.views import (
     AIInsightView,
     AnalyticsDashboardView,
     ConsultantAnalyticsView,

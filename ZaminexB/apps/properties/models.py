@@ -89,7 +89,7 @@ class Property(models.Model):
     # rent at once.
     #
     # Nothing reads this column directly any more: every caller goes through
-    # `apps.common.metrics.effective_sale_price`, which prefers the property's
+    # `apps.analytics.metrics.effective_sale_price`, which prefers the property's
     # sale listings and only falls back here for records created before the
     # split. It is retained so those historical figures stay readable, and can
     # be dropped once no row relies on the fallback.

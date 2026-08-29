@@ -10,7 +10,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.common.analytics_views import _get_monthly_revenue, PERSIAN_MONTHS
+from apps.analytics.views import _get_monthly_revenue, PERSIAN_MONTHS
 from apps.listings.models import Listing
 from apps.properties.models import Property
 

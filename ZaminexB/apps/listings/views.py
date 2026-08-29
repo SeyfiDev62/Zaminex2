@@ -77,7 +77,7 @@ class ListingViewSet(viewsets.ModelViewSet):
             # filtered list, shared by all rows' ``property_detail.price``
             # (see PropertyMiniSerializer.get_price). Without this, each row
             # re-read its property's listings — the 8000-query list of Phase 0.
-            from apps.common.metrics import annotate_effective_prices
+            from apps.analytics.metrics import annotate_effective_prices
 
             property_ids = set(
                 self.filter_queryset(self.get_queryset())

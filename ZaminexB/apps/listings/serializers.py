@@ -3,7 +3,7 @@ from rest_framework import serializers
 
 from apps.basics.models import Attribute, DealType
 from apps.common.attribute_serializers import AttributeValuesMixin
-from apps.common.metrics import (
+from apps.analytics.metrics import (
     content_richness_score,
     engagement_heat_score,
     images_count_for_property,
@@ -31,7 +31,7 @@ class PropertyMiniSerializer(serializers.ModelSerializer):
         if price_map is not None:
             price = price_map.get(obj.pk, obj.price)
         else:
-            from apps.common.metrics import effective_sale_price
+            from apps.analytics.metrics import effective_sale_price
 
             price = effective_sale_price(obj)
         return str(price) if price is not None else None

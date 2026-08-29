@@ -80,6 +80,7 @@ INSTALLED_APPS = [
     'apps.followups.apps.FollowupsConfig',
     'apps.tickets.apps.TicketsConfig',
     'apps.reports.apps.ReportsConfig',
+    'apps.analytics.apps.AnalyticsConfig',
     'rest_framework',
 ]
 
