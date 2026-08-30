@@ -999,7 +999,9 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
 
         setSelectedProperty(data);
         setSelectedPropertyId(String(data.id));
-        setEditingPropertyId(String(data.id));
+        // After a save the edit session is over: clear the marker so reopening
+        // the edit form starts fresh (the wizard navigates to the detail page).
+        setEditingPropertyId(null);
 
         setProperties((prev) => {
           const exists = prev.some((p) => String(p.id) === String(data.id));
