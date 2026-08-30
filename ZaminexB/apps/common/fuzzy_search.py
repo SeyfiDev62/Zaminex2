@@ -187,21 +187,30 @@ def normalize_persian_text(value) -> str:
 
 
 def _pg_trgm_available() -> bool:
-    """Whether the pg_trgm extension is installed on the connected PostgreSQL.
+    """Whether pg_trgm is installed AND usable for Persian text.
 
     The trigram path depends on the `pg_trgm` extension; on a database where it
     is missing (e.g. an existing install that predates the enabling migration)
-    the similarity() function does not exist and every search would 500. We
-    detect it lazily and fall back to the portable fuzzy path instead.
+    the similarity() function does not exist and every search would 500.
+
+    Installed is not enough, though: on a database whose LC_CTYPE is the
+    plain "C" locale, pg_trgm classifies every non-ASCII letter as
+    non-alphanumeric, so ``show_trgm('آپارتمان')`` returns ``{}`` — every
+    Persian similarity scores 0 and typo tolerance silently dies while the
+    portable fallback (which handles exactly this) never activates.
+
+    Probing ``show_trgm`` with a Persian sample covers both failure modes in
+    one query: a missing extension raises (function does not exist) and a
+    C-locale database returns an empty trigram array. Either way we fall
+    back to the portable fuzzy path instead.
     """
     if getattr(connection, "vendor", "") != "postgresql":
         return False
     try:
         with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
-            )
-            return cursor.fetchone() is not None
+            cursor.execute("SELECT show_trgm(%s)", ["آپارتمان"])
+            row = cursor.fetchone()
+            return bool(row and row[0])
     except Exception:
         return False
 
