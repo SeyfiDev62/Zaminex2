@@ -314,7 +314,10 @@ class TicketSecurityTests(TestCase):
         self.assertEqual(detail.status_code, 200)
         export = self.client.get("/tickets/api/tickets/export/?folder=all")
         self.assertEqual(export.status_code, 200)
-        self.assertIn("TKT-", export.content.decode("utf-8-sig"))
+        # The CSV export is a StreamingHttpResponse (rows are generated on the
+        # fly); streaming responses expose `streaming_content`, not `content`.
+        body = b"".join(export.streaming_content).decode("utf-8-sig")
+        self.assertIn("TKT-", body)
 
     def test_safe_pdf_attachments_are_stored_and_returned_only_to_participants(self):
         self._auth(self.owner)

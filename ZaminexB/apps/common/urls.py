@@ -1,7 +1,7 @@
 from django.urls import path
 
-from .activity_views import ActivityLogListView, ActivityLogUserListView
-from .analytics_views import (
+from apps.activity.views import ActivityLogListView, ActivityLogUserListView
+from apps.analytics.views import (
     AIInsightView,
     AnalyticsDashboardView,
     ConsultantAnalyticsView,
@@ -9,13 +9,12 @@ from .analytics_views import (
     ListingAnalyticsView,
     PropertyAnalyticsView,
 )
+from apps.notifications.views import NotificationListView, NotificationMarkReadView
 from .views import (
     CompanySettingsView,
     DistrictListView,
     DistrictManageView,
     LoginStatsView,
-    NotificationListView,
-    NotificationMarkReadView,
     PasswordResetRequestView,
     AdminPasswordChangeView,
 )

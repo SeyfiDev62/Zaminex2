@@ -49,9 +49,25 @@ class PropertyWizardPayloadTests(TestCase):
             "district": "مرکزی",
             "fullAddress": "تهران",
             "consultant": self.agent.pk,
+            # Owner contact became mandatory on create (properties.0012);
+            # the wizard always sends it, so the test payload must too.
+            "ownerFirstName": "تست",
+            "ownerLastName": "تستی",
+            "ownerPhone": "09121234567",
         }
         payload.update(overrides)
         return payload
+
+    def _created_property(self, response):
+        """Fetch the property the wizard just created.
+
+        `internalCode` is read-only on the API and `Property.save()`
+        auto-generates a sequential ZF_xxxx code for new rows, so the
+        WIZ-1 value sent in the payload is never stored. The row must be
+        retrieved through the `id` echoed back in the create response.
+        """
+        self.assertEqual(response.status_code, 201, response.content[:400])
+        return Property.objects.get(pk=response.json()["id"])
 
     def test_a_property_is_created_without_a_price(self):
         """Price moved to the listing, so it must no longer be required."""
@@ -60,24 +76,24 @@ class PropertyWizardPayloadTests(TestCase):
         )
         self.assertEqual(response.status_code, 201, response.content[:400])
 
-        prop = Property.objects.get(internal_code="WIZ-1")
+        prop = self._created_property(response)
         self.assertIsNone(prop.price)
 
     def test_the_legacy_type_column_is_kept_in_sync(self):
         """Existing readers still use `property_type`, so it must stay correct."""
-        self.client.post(
+        response = self.client.post(
             "/properties/api/properties/", self._payload(), content_type="application/json"
         )
-        prop = Property.objects.get(internal_code="WIZ-1")
+        prop = self._created_property(response)
 
         self.assertEqual(prop.property_type_ref, self.apartment)
         self.assertEqual(prop.property_type, "APARTMENT")
 
     def test_the_usage_is_derived_from_the_type(self):
-        self.client.post(
+        response = self.client.post(
             "/properties/api/properties/", self._payload(), content_type="application/json"
         )
-        prop = Property.objects.get(internal_code="WIZ-1")
+        prop = self._created_property(response)
         self.assertEqual(prop.property_usage.name, "residential")
 
     def test_custom_fields_are_stored_and_returned(self):
@@ -122,12 +138,12 @@ class PropertyWizardPayloadTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_updating_replaces_a_value_and_clears_another(self):
-        self.client.post(
+        response = self.client.post(
             "/properties/api/properties/",
             self._payload(attributes={"total_floors": 10, "parking": True}),
             content_type="application/json",
         )
-        prop = Property.objects.get(internal_code="WIZ-1")
+        prop = self._created_property(response)
 
         response = self.client.patch(
             f"/properties/api/properties/{prop.pk}/",
@@ -398,7 +414,7 @@ class NullPriceRobustnessTests(TestCase):
 
     def test_the_neighbourhood_average_ignores_properties_without_a_price(self):
         """Treating a missing price as zero would halve the average."""
-        from apps.common.metrics import build_neighborhood_price_per_sqm_map
+        from apps.analytics.metrics import build_neighborhood_price_per_sqm_map
 
         averages = build_neighborhood_price_per_sqm_map()
         self.assertEqual(averages["مشترک"], 10_000_000)

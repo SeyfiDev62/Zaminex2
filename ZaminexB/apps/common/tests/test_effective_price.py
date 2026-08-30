@@ -14,7 +14,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from apps.basics.models import DealType, PropertyType
-from apps.common.metrics import (
+from apps.analytics.metrics import (
     annotate_effective_prices,
     build_neighborhood_price_per_sqm_map,
     effective_sale_price,
@@ -242,7 +242,7 @@ class SerializedPriceTests(TestCase):
         )
         cls.property = Property.objects.create(
             title="ملک",
-            internal_code="SER-1",
+            internal_code="ZF_9051",
             consultant=cls.agent,
             property_type="APARTMENT",
             area=100,
@@ -265,15 +265,20 @@ class SerializedPriceTests(TestCase):
         response = self.client.get("/properties/api/properties/")
         self.assertEqual(response.status_code, 200)
 
-        row = next(p for p in response.json()["results"] if p["internalCode"] == "SER-1")
+        row = next(p for p in response.json()["results"] if p["internalCode"] == "ZF_9051")
         self.assertEqual(int(float(row["price"])), 10_000_000_000)
-        self.assertEqual(row["pricePerSqm"], 100_000_000.0)
+
+        # Phase 1 moved the market-metric block (pricePerSqm, …) off the slim
+        # list payload; the detail endpoint still derives and reports it.
+        detail = self.client.get(f"/properties/api/properties/{self.property.pk}/")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["pricePerSqm"], 100_000_000.0)
 
     def test_an_unpriced_property_reports_null_rather_than_zero(self):
         """Zero would look like a real price of nothing in the UI."""
         Property.objects.create(
             title="بدون آگهی",
-            internal_code="SER-2",
+            internal_code="ZF_9052",
             consultant=self.agent,
             property_type="APARTMENT",
             area=80,
@@ -281,7 +286,7 @@ class SerializedPriceTests(TestCase):
             neighborhood="محله",
         )
         response = self.client.get("/properties/api/properties/")
-        row = next(p for p in response.json()["results"] if p["internalCode"] == "SER-2")
+        row = next(p for p in response.json()["results"] if p["internalCode"] == "ZF_9052")
         self.assertIsNone(row["price"])
 
     def test_the_property_report_uses_the_derived_price(self):

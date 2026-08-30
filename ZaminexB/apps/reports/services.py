@@ -298,7 +298,7 @@ def compute_property_report(prop: Property, *, filters: dict | None = None) -> d
     # ---- 4. Price_Per_Sqm (map points) --------------------------------------
     # Pricing lives on the listing now; `effective_sale_price` reads the
     # property's sale listings and falls back to the legacy column.
-    from apps.common.metrics import effective_sale_price as _sale_price
+    from apps.analytics.metrics import effective_sale_price as _sale_price
 
     pps = None
     _price = _sale_price(prop)
@@ -392,7 +392,7 @@ def compute_property_report(prop: Property, *, filters: dict | None = None) -> d
     # ---- 8. Price_Deviation_Index -------------------------------------------
     # Compare against comparable (same neighborhood, same deal_type). Require
     # at least 2 comparables; otherwise fall back to all neighborhood props.
-    from apps.common.metrics import build_neighborhood_price_per_sqm_map as _build_map
+    from apps.analytics.metrics import build_neighborhood_price_per_sqm_map as _build_map
 
     neighborhood_avg: float | None = None
     # Comparable neighbourhood properties, ALWAYS excluding the property itself
@@ -460,7 +460,7 @@ def compute_property_report(prop: Property, *, filters: dict | None = None) -> d
         )
 
     # ---- 9. Geo_Precision_Flag ----------------------------------------------
-    from apps.common.metrics import geo_precision_flag as _geo_flag
+    from apps.analytics.metrics import geo_precision_flag as _geo_flag
 
     geo_flag = _geo_flag(prop.latitude, prop.longitude)
     geo_donut = [
@@ -782,7 +782,7 @@ def compute_consultant_scope_report(user) -> dict[str, Any]:
     # price per sqm scatter (lat/lng → value)
     # One query resolves every property's sale price, so the map does not fire
     # a lookup per row.
-    from apps.common.metrics import annotate_effective_prices as _price_map_for
+    from apps.analytics.metrics import annotate_effective_prices as _price_map_for
 
     _prices = _price_map_for(props)
     price_map = []
@@ -812,7 +812,7 @@ def compute_consultant_scope_report(user) -> dict[str, Any]:
     channel_chart = [{"label": k, "count": v} for k, v in channel_counts.items()]
 
     # geo precision donut
-    from apps.common.metrics import geo_precision_flag
+    from apps.analytics.metrics import geo_precision_flag
 
     geo_good = sum(1 for p in props if geo_precision_flag(p.latitude, p.longitude))
     geo_bad = len(props) - geo_good

@@ -10,7 +10,7 @@ from pathlib import Path
 from rest_framework.test import APIClient
 
 from apps.accounts.models import ConsultantProfile, LoginAttempt, UserRole
-from apps.common.ai_url import UnsafeAIURL, assert_public_https_url
+from apps.analytics.ai_url import UnsafeAIURL, assert_public_https_url
 from apps.followups.models import FollowUp, FollowUpType
 from apps.listings.models import Listing
 from apps.properties.models import Property

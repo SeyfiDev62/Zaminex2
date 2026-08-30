@@ -1,7 +1,7 @@
 from django.test import TestCase
 from django.contrib.auth import get_user_model
-from apps.common.activity import log_activity
-from apps.common.models import ActivityLog
+from apps.activity.activity import log_activity
+from apps.activity.models import ActivityLog
 from apps.common.thread_locals import set_current_user, clear_current_user
 
 User = get_user_model()

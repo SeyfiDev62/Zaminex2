@@ -281,7 +281,7 @@ class ReferenceInvalidationTests(Phase5Base):
 
 class PollCacheTests(Phase5Base):
     def test_notifications_poll_second_read_is_a_hit(self):
-        from apps.common.models import Notification
+        from apps.notifications.models import Notification
 
         Notification.objects.create(
             user=self.agent,
@@ -299,7 +299,7 @@ class PollCacheTests(Phase5Base):
         self.assertLess(len(ctx2.captured_queries), len(ctx1.captured_queries))
 
     def test_notifications_are_isolated_per_user(self):
-        from apps.common.models import Notification
+        from apps.notifications.models import Notification
 
         Notification.objects.create(
             user=self.admin,
@@ -325,7 +325,7 @@ class PollCacheTests(Phase5Base):
         self.assertEqual(admin_titles, ["برای مدیر"])
 
     def test_mark_read_invalidates_the_notifications_poll(self):
-        from apps.common.models import Notification
+        from apps.notifications.models import Notification
 
         notif = Notification.objects.create(
             user=self.agent,
@@ -394,7 +394,7 @@ class PollCacheTests(Phase5Base):
         self.assertEqual(r2.json()["count"], 0)
 
     def test_poll_fail_open_with_dead_cache(self):
-        from apps.common.models import Notification
+        from apps.notifications.models import Notification
 
         Notification.objects.create(
             user=self.agent,

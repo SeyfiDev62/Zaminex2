@@ -21,7 +21,7 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.common.activity import log_activity
+from apps.activity.activity import log_activity
 from apps.common.date_filters import (
     apply_datetime_field_range,
     parse_gregorian_date,

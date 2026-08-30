@@ -18,63 +18,6 @@ class District(models.Model):
         return self.name
 
 
-class ActivityLog(models.Model):
-    """Tracks user actions across the CRM for the activity feed."""
-
-    class ActionType(models.TextChoices):
-        CREATE = "create", "ایجاد"
-        UPDATE = "update", "بروزرسانی"
-        DELETE = "delete", "حذف"
-        ARCHIVE = "archive", "بایگانی"
-        COMPLETE = "complete", "تکمیل"
-        STATUS_CHANGE = "status_change", "تغییر وضعیت"
-        APPROVE = "approve", "تایید"
-        REJECT = "reject", "رد"
-        EXPORT = "export", "خروجی"
-
-    class TargetType(models.TextChoices):
-        PROPERTY = "property", "ملک"
-        LISTING = "listing", "آگهی"
-        TASK = "task", "وظیفه"
-        FOLLOWUP = "followup", "پیگیری"
-        TICKET = "ticket", "تیکت"
-        CONSULTANT = "consultant", "مشاور"
-        SYSTEM = "system", "سیستم"
-
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="activity_logs",
-        verbose_name="کاربر",
-    )
-    action = models.CharField(max_length=20, choices=ActionType.choices, db_index=True, verbose_name="عملیات")
-    target_type = models.CharField(max_length=20, choices=TargetType.choices, db_index=True, verbose_name="نوع هدف")
-    target_id = models.IntegerField(null=True, blank=True, verbose_name="شناسه هدف")
-    description = models.CharField(max_length=500, verbose_name="توضیحات")
-    metadata = models.JSONField(default=dict, blank=True, verbose_name="جزئیات")
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True, verbose_name="تاریخ ایجاد")
-
-    class Meta:
-        verbose_name = "لاگ فعالیت"
-        verbose_name_plural = "لاگ‌های فعالیت"
-        ordering = ["-created_at"]
-        indexes = [
-            models.Index(fields=["user", "-created_at"]),
-            models.Index(fields=["target_type", "-created_at"]),
-            models.Index(fields=["action", "-created_at"]),
-        ]
-
-    def __str__(self):
-        user_name = (
-            (self.user.get_full_name().strip() or self.user.username)
-            if self.user
-            else "سیستم"
-        )
-        return f"[{self.get_action_display()}] {user_name}: {self.description}"
-
-
 class CompanySettings(models.Model):
     company_name = models.CharField(max_length=255, verbose_name="نام شرکت")
     license_number = models.CharField(max_length=50, blank=True, verbose_name="شماره پروانه")
@@ -132,7 +75,7 @@ class CompanySettings(models.Model):
     def clean(self):
         from django.core.exceptions import ValidationError
 
-        from apps.common.ai_url import UnsafeAIURL, assert_public_https_url
+        from apps.analytics.ai_url import UnsafeAIURL, assert_public_https_url
 
         super().clean()
         model_name = (self.ai_model or "").strip()
@@ -167,75 +110,3 @@ class CompanySettings(models.Model):
     @property
     def DistrictModel(cls):
         return District
-
-
-class AIInsightCache(models.Model):
-    """Persisted AI description, keyed by entity so workers cannot mix records.
-
-    LocMemCache is per-process; without a shared store the same property is
-    re-sent to the model on every request that hits a different worker, and a
-    stale in-memory entry can be served for the wrong record. One row per
-    (entity, entity_id) is the source of truth; the in-process cache is only a
-    fast path in front of it.
-    """
-
-    entity = models.CharField(max_length=20, verbose_name="موجودیت")
-    entity_id = models.PositiveIntegerField(verbose_name="شناسه")
-    fingerprint = models.CharField(max_length=64, verbose_name="اثر انگشت داده")
-    payload = models.JSONField(verbose_name="خروجی مدل")
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="تاریخ ایجاد")
-    updated_at = models.DateTimeField(auto_now=True, verbose_name="تاریخ بروزرسانی")
-
-    class Meta:
-        verbose_name = "کش تحلیل هوش مصنوعی"
-        verbose_name_plural = "کش تحلیل هوش مصنوعی"
-        constraints = [
-            models.UniqueConstraint(
-                fields=["entity", "entity_id"], name="uniq_ai_insight_entity"
-            ),
-        ]
-
-    def __str__(self):
-        return f"{self.entity}:{self.entity_id}"
-
-
-class Notification(models.Model):
-    """Notification system for user actions and system events."""
-    
-    class NotificationType(models.TextChoices):
-        PASSWORD_RESET_REQUEST = 'password_reset_request', 'درخواست تغییر رمز عبور'
-        PASSWORD_CHANGED = 'password_changed', 'تغییر رمز عبور'
-        TASK_ASSIGNED = 'task_assigned', 'وظیفه جدید'
-        TASK_STATUS_CHANGED = 'task_status_changed', 'تغییر وضعیت وظیفه'
-        FOLLOWUP_CREATED = 'followup_created', 'پیگیری جدید'
-        PROPERTY_ASSIGNED = 'property_assigned', 'ملک جدید'
-        LISTING_APPROVED = 'listing_approved', 'تایید آگهی'
-        LISTING_REJECTED = 'listing_rejected', 'رد آگهی'
-        TICKET_CREATED = 'ticket_created', 'تیکت جدید'
-        TICKET_REPLY = 'ticket_reply', 'پاسخ جدید تیکت'
-        TICKET_STATUS_CHANGED = 'ticket_status_changed', 'تغییر وضعیت تیکت'
-    
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='notifications',
-        verbose_name="کاربر"
-    )
-    type = models.CharField(max_length=50, choices=NotificationType.choices, verbose_name="نوع اعلان")
-    title = models.CharField(max_length=255, verbose_name="عنوان")
-    message = models.TextField(verbose_name="متن پیام")
-    is_read = models.BooleanField(default=False, verbose_name="خوانده شده")
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="تاریخ ایجاد")
-    metadata = models.JSONField(default=dict, blank=True, verbose_name="جزئیات")
-    
-    class Meta:
-        verbose_name = "اعلان"
-        verbose_name_plural = "اعلان‌ها"
-        ordering = ['-created_at']
-        indexes = [
-            models.Index(fields=['user', '-created_at']),
-            models.Index(fields=['user', 'is_read']),
-        ]
-    
-    def __str__(self):
-        return f"{self.user.username} - {self.title}"

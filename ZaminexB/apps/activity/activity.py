@@ -5,7 +5,7 @@ Call `log_activity(...)` from views, serializers, or signals to record
 user actions. The ActivityLog model stores them for the activity feed.
 """
 from .models import ActivityLog
-from .thread_locals import get_current_user
+from apps.common.thread_locals import get_current_user
 
 
 def log_activity(

@@ -25,8 +25,9 @@ from django.test import Client, TestCase, TransactionTestCase
 
 from apps.accounts.models import ConsultantProfile, User
 from apps.common import cache_utils
-from apps.common.ai_service import get_cached_description
-from apps.common.models import AIInsightCache, CompanySettings
+from apps.analytics.ai_service import get_cached_description
+from apps.analytics.models import AIInsightCache
+from apps.common.models import CompanySettings
 
 
 class _SharedStore:
@@ -118,7 +119,7 @@ class AICacheCrossProcessTests(Phase3Base):
 
         # Worker A: cold cache → generates once.
         with mock.patch.object(cache_utils, "_cache", return_value=store.backend("worker-a")), \
-             mock.patch("apps.common.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m:
+             mock.patch("apps.analytics.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m:
             first = get_cached_description(
                 self._data(), entity="consultant", entity_id=self.profile.pk
             )
@@ -131,7 +132,7 @@ class AICacheCrossProcessTests(Phase3Base):
         # Worker B: a distinct backend handle on the same store (fresh
         # process state), same data → must hit the shared cache.
         with mock.patch.object(cache_utils, "_cache", return_value=store.backend("worker-b")), \
-             mock.patch("apps.common.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m2:
+             mock.patch("apps.analytics.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m2:
             second = get_cached_description(
                 self._data(), entity="consultant", entity_id=self.profile.pk
             )
@@ -141,7 +142,7 @@ class AICacheCrossProcessTests(Phase3Base):
     def test_cache_key_is_versioned_and_json_encoded(self):
         store = _SharedStore()
         with mock.patch.object(cache_utils, "_cache", return_value=store.backend("w")), \
-             mock.patch("apps.common.ai_service._chat_completion", return_value=_ai_raw("احمد")):
+             mock.patch("apps.analytics.ai_service._chat_completion", return_value=_ai_raw("احمد")):
             get_cached_description(
                 self._data(), entity="consultant", entity_id=self.profile.pk
             )
@@ -160,7 +161,7 @@ class AICacheCrossProcessTests(Phase3Base):
     def test_changed_data_still_triggers_regeneration(self):
         store = _SharedStore()
         with mock.patch.object(cache_utils, "_cache", return_value=store.backend("w")), \
-             mock.patch("apps.common.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m:
+             mock.patch("apps.analytics.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m:
             get_cached_description(self._data(), entity="consultant", entity_id=self.profile.pk)
             # New data → new fingerprint → a new generation, not the old cache.
             get_cached_description(
@@ -231,7 +232,7 @@ class AIHerdProtectionTests(TransactionTestCase):
 
                 connection.close()
 
-        with mock.patch("apps.common.ai_service._chat_completion", side_effect=slow_chat_completion):
+        with mock.patch("apps.analytics.ai_service._chat_completion", side_effect=slow_chat_completion):
             threads = [threading.Thread(target=worker) for _ in range(5)]
             for t in threads:
                 t.start()
@@ -258,7 +259,7 @@ class AIFailOpenTests(Phase3Base):
 
     def test_dead_cache_serves_from_the_db_without_llm_call(self):
         # Warm the DB row with a live cache first (one model call).
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m:
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m:
             first = get_cached_description(
                 self._data(), entity="consultant", entity_id=self.profile.pk
             )
@@ -266,7 +267,7 @@ class AIFailOpenTests(Phase3Base):
 
         # Cache is now dead: the DB row must serve the request.
         with mock.patch.object(cache_utils, "_cache", return_value=self._DeadCache()), \
-             mock.patch("apps.common.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m2:
+             mock.patch("apps.analytics.ai_service._chat_completion", return_value=_ai_raw("احمد")) as m2:
             second = get_cached_description(
                 self._data(), entity="consultant", entity_id=self.profile.pk
             )

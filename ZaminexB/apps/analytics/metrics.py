@@ -223,7 +223,7 @@ def cached_neighborhood_price_stats_map(ttl: int = 60) -> dict[str, dict[str, An
     (``apps.common.cache_invalidation``) drops the key when a property or
     listing save changes the inputs, so the TTL is a backstop, not the norm.
     """
-    from . import cache_utils
+    from apps.common import cache_utils
 
     key = cache_utils.make_key("stats", "neighborhoods")
     return cache_utils.cache_or_compute(key, build_neighborhood_price_stats_map, ttl)

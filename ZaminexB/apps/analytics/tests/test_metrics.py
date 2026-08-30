@@ -7,7 +7,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import ConsultantProfile, UserRole
-from apps.common.metrics import (
+from apps.analytics.metrics import (
     consultant_ranking_metrics,
     content_richness_score,
     delegation_indicator,
@@ -251,7 +251,7 @@ class AnalyticsAPITests(TestCase):
         self.assertEqual(data["kpis"]["totalProperties"], 1)
 
     def test_monthly_revenue_counts_all_deal_types(self):
-        from apps.common.analytics_views import _get_monthly_revenue
+        from apps.analytics.views import _get_monthly_revenue
 
         rent = Listing.objects.create(
             property=self.prop,

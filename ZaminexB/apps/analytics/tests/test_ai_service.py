@@ -11,7 +11,7 @@ from rest_framework.test import APIClient
 
 from apps.accounts.models import ConsultantProfile, User
 from apps.basics.models import DealType
-from apps.common.ai_service import (
+from apps.analytics.ai_service import (
     AIError,
     _extract_json,
     _parse_description,
@@ -62,7 +62,7 @@ class AIServiceUnitTests(TestCase):
 
     def test_chat_payload_omits_model_when_empty(self):
         """When the model is empty, the request payload must not send model=''."""
-        from apps.common import ai_service
+        from apps.analytics import ai_service
         s = CompanySettings.get_solo()
         s.ai_model = ""
         s.save()
@@ -89,14 +89,14 @@ class AIServiceUnitTests(TestCase):
                     return False
             return R()
 
-        with mock.patch("apps.common.ai_service._urlopen", side_effect=fake_urlopen):
+        with mock.patch("apps.analytics.ai_service._urlopen", side_effect=fake_urlopen):
             out = ai_service.generate_description({"x": 1}, entity="consultant")
 
         self.assertNotIn("model", captured["body"])
         self.assertEqual(out["summary"], "s")
 
     def test_chat_payload_includes_model_when_set(self):
-        from apps.common import ai_service
+        from apps.analytics import ai_service
         s = CompanySettings.get_solo()
         s.ai_model = "gpt-4o-mini"
         s.save()
@@ -121,14 +121,14 @@ class AIServiceUnitTests(TestCase):
                     return False
             return R()
 
-        with mock.patch("apps.common.ai_service._urlopen", side_effect=fake_urlopen):
+        with mock.patch("apps.analytics.ai_service._urlopen", side_effect=fake_urlopen):
             ai_service.generate_description({"x": 1}, entity="consultant")
 
         self.assertEqual(captured["body"]["model"], "gpt-4o-mini")
 
     def test_generate_description_parses_clean_json(self):
         raw = '{"positives":["یک","دو","سه"],"negatives":["الف","ب","ج"],"summary":"خلاصه"}'
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=raw):
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=raw):
             out = generate_description({"kpis": {}}, entity="consultant")
         self.assertEqual(out["positives"], ["یک", "دو", "سه"])
         self.assertEqual(out["negatives"], ["الف", "ب", "ج"])
@@ -189,7 +189,7 @@ class AIEndpointTests(TestCase):
             '"negatives":["تنوع آگهی کم","تأخیر در برخی وظایف","پیگیری محدود"],'
             '"summary":"مشاوری فعال و منظم"}'
         )
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=raw):
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=raw):
             c = APIClient()
             c.force_authenticate(user=self.admin)
             r = c.post(f"/common/api/ai/consultant/{self.profile.pk}/")
@@ -216,7 +216,7 @@ class AIEndpointTests(TestCase):
             '"negatives":["تصاویر کم","سن بنا","بدون آسانسور"],'
             '"summary":"ملکی مناسب برای سرمایه‌گذاری"}'
         )
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=raw):
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=raw):
             c = APIClient()
             c.force_authenticate(user=self.admin)
             r = c.post(f"/common/api/ai/property/{prop.pk}/")
@@ -261,7 +261,7 @@ class AICacheAndIsolationTests(TestCase):
     def setUp(self):
         from django.core.cache import cache
 
-        from apps.common.models import AIInsightCache
+        from apps.analytics.models import AIInsightCache
 
         cache.clear()  # LocMemCache persists across tests within a process
         AIInsightCache.objects.all().delete()
@@ -280,7 +280,7 @@ class AICacheAndIsolationTests(TestCase):
 
     def test_cache_returns_same_result_without_new_call(self):
         raw = self._raw("احمد")
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=raw) as m:
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=raw) as m:
             first = get_cached_description(
                 {"name": "احمد", "kpis": {"openTasks": 3}}, entity="consultant", entity_id=self.p1.pk
             )
@@ -293,7 +293,7 @@ class AICacheAndIsolationTests(TestCase):
 
     def test_changed_data_triggers_new_call(self):
         raw = self._raw("احمد")
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=raw) as m:
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=raw) as m:
             get_cached_description(
                 {"name": "احمد", "kpis": {"openTasks": 3}}, entity="consultant", entity_id=self.p1.pk
             )
@@ -320,7 +320,7 @@ class AICacheAndIsolationTests(TestCase):
             raise AssertionError("Unexpected data in prompt!")
 
         with mock.patch(
-            "apps.common.ai_service._chat_completion", side_effect=fake_chat
+            "apps.analytics.ai_service._chat_completion", side_effect=fake_chat
         ):
             a1 = get_cached_description(
                 {"name": "احمد"}, entity="consultant", entity_id=self.p1.pk
@@ -374,7 +374,7 @@ class AICacheAndIsolationTests(TestCase):
 
     def test_clock_fields_do_not_bust_the_cache(self):
         raw = self._raw("ملک")
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=raw) as m:
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=raw) as m:
             get_cached_description(
                 {"title": "الف", "kpis": {"daysOnMarket": 3}},
                 entity="property",
@@ -389,7 +389,7 @@ class AICacheAndIsolationTests(TestCase):
 
     def test_db_cache_survives_locmem_clear(self):
         raw = self._raw("احمد")
-        with mock.patch("apps.common.ai_service._chat_completion", return_value=raw) as m:
+        with mock.patch("apps.analytics.ai_service._chat_completion", return_value=raw) as m:
             first = get_cached_description(
                 {"name": "احمد"}, entity="consultant", entity_id=self.p1.pk
             )

@@ -3,7 +3,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
 
-from apps.common.metrics import consultant_performance_metrics
+from apps.analytics.metrics import consultant_performance_metrics
 
 from .models import AdminProfile, ConsultantProfile, UserRole
 

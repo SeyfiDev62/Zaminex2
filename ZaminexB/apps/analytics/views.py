@@ -18,7 +18,7 @@ from apps.listings.models import Listing
 from apps.properties.models import Property
 from apps.tasks.models import Task
 
-from . import cache_utils
+from apps.common import cache_utils
 
 from .metrics import (
     build_neighborhood_price_stats_map,
@@ -81,7 +81,7 @@ def _sale_listing_value(listing) -> Decimal | None:
 
 
 # Deal-type ``name``s whose monetary value is an outright purchase figure.
-# Kept in sync with apps.common.metrics.SALE_LIKE_DEAL_TYPES.
+# Kept in sync with apps.analytics.metrics.SALE_LIKE_DEAL_TYPES.
 SALE_LIKE_DEAL_NAMES = {"sale", "presale", "exchange", "partnership"}
 # Deal types whose headline figure is the deposit/رهن. A companion monthly rent
 # (اجاره) is added on top when present.
@@ -873,7 +873,7 @@ def _consultant_ai_data(profile) -> dict:
 
 def _property_ai_data(prop) -> dict:
     """Collect the analytics data sent to the AI for a property description."""
-    from apps.common.metrics import property_market_metrics
+    from apps.analytics.metrics import property_market_metrics
     from apps.reports.caching import cached_property_report
 
     market = property_market_metrics(prop)
@@ -913,7 +913,7 @@ class AIInsightView(APIView):
     throttle_scope = "ai"
 
     def post(self, request, entity, pk):
-        from apps.common.ai_service import AIError, get_cached_description
+        from apps.analytics.ai_service import AIError, get_cached_description
 
         # Resolve the object with permission scoping.
         if entity == "consultant":
