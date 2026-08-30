@@ -49,6 +49,11 @@ class PropertyWizardPayloadTests(TestCase):
             "district": "مرکزی",
             "fullAddress": "تهران",
             "consultant": self.agent.pk,
+            # Owner contact became mandatory on create (properties.0012);
+            # the wizard always sends it, so the test payload must too.
+            "ownerFirstName": "تست",
+            "ownerLastName": "تستی",
+            "ownerPhone": "09121234567",
         }
         payload.update(overrides)
         return payload

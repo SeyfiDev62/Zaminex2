@@ -276,6 +276,14 @@ class PropertyLocationAPITests(TestCase):
     def setUp(self):
         self.client.force_login(self.admin)
 
+    # Owner contact became mandatory on create (properties.0012); the wizard
+    # always sends it, so these test payloads must too.
+    OWNER_FIELDS = {
+        "ownerFirstName": "تست",
+        "ownerLastName": "تستی",
+        "ownerPhone": "09121234567",
+    }
+
     def test_creating_with_district_id_fills_the_location_fields(self):
         response = self.client.post(
             "/properties/api/properties/",
@@ -287,6 +295,7 @@ class PropertyLocationAPITests(TestCase):
                 "districtId": self.district.pk,
                 "fullAddress": "ساری",
                 "consultant": self.agent.pk,
+                **self.OWNER_FIELDS,
             },
             content_type="application/json",
         )
@@ -313,6 +322,7 @@ class PropertyLocationAPITests(TestCase):
                 "district": "محله آزاد",
                 "fullAddress": "ساری",
                 "consultant": self.agent.pk,
+                **self.OWNER_FIELDS,
             },
             content_type="application/json",
         )
@@ -331,6 +341,7 @@ class PropertyLocationAPITests(TestCase):
                 "districtId": self.district.pk,
                 "fullAddress": "ساری",
                 "consultant": self.agent.pk,
+                **self.OWNER_FIELDS,
             },
             content_type="application/json",
         )
