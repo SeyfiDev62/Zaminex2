@@ -313,6 +313,12 @@ _VOLATILE_KEYS = {
     "effectiveExposureAvg",
     "engagementHeatmap",
     "exposureTimeline",
+    # Chart arrays derived from `today - listing.start_date` for active
+    # listings (start_date set, end_date null/future): they advance every
+    # day, so a day boundary made the fingerprint flip and re-hit the model
+    # on open even though the record's business data was unchanged.
+    "spatialScatter",
+    "avgLifespanByChannel",
 }
 
 
