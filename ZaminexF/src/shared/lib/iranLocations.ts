@@ -81,9 +81,18 @@ export const IRAN_CITY_CENTERS: Record<string, LatLng> = {
   "ایلام": [33.6374, 46.4227],
 };
 
-/** Default view: northern Iran (Tehran area, zoomed to country level). */
-export const IRAN_DEFAULT_CENTER: LatLng = [35.6892, 53.0];
-export const IRAN_DEFAULT_ZOOM = 5;
+/**
+ * Default view for maps without a located record: Mazandaran province.
+ *
+ * Centre is the midpoint of the province bounds (lat 35.9–36.9, lng 52.1–54.4):
+ *   lat = (35.9 + 36.9) / 2 = 36.4,  lng = (52.1 + 54.4) / 2 = 53.25 ≈ 53.2.
+ *
+ * Zoom 8 is chosen for the smallest map surface (the picker panel is h-64 ≈
+ * 256px): visible latitude span at zoom z ≈ 360 / 2^z, so z=8 → ≈1.4°, which
+ * fits the province's ≈1.0° latitude span with margin; z=9 → ≈0.7° would crop it.
+ */
+export const DEFAULT_VIEW_CENTER: LatLng = [36.4, 53.2];
+export const DEFAULT_VIEW_ZOOM = 8;
 
 // ---------------------------------------------------------------------------
 //  Nominatim (OSM) geocoding — free, no key

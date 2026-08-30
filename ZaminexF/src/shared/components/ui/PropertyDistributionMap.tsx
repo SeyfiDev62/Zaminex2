@@ -11,7 +11,7 @@ import React, { useMemo } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import { MapPin } from "lucide-react";
-import { IRAN_DEFAULT_CENTER } from "../../lib/iranLocations";
+import { DEFAULT_VIEW_CENTER, DEFAULT_VIEW_ZOOM } from "../../lib/iranLocations";
 import { consultantMarkerColor } from "../../lib/consultantColors";
 import {
   makePinIcon,
@@ -59,10 +59,10 @@ function PropertyDistributionMap({
       const lng = points.reduce((s, p) => s + p.lng, 0) / points.length;
       return [lat, lng];
     }
-    return IRAN_DEFAULT_CENTER;
+    return DEFAULT_VIEW_CENTER;
   }, [points]);
 
-  const zoom = points.length === 1 ? 13 : points.length > 1 ? 8 : 5;
+  const zoom = points.length === 1 ? 13 : points.length > 1 ? 8 : DEFAULT_VIEW_ZOOM;
 
   const consultantIds = useMemo(() => points.map((p) => p.consultantId), [points]);
 

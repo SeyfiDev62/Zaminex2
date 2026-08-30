@@ -3,6 +3,46 @@
 Per-stage root-cause evidence. Essential findings are also reproduced in each
 stage report.
 
+## Stage 4 — maps default to Mazandaran (Bug 3)
+
+### Reproduce / locate
+
+Grep for `IRAN_DEFAULT_*` across `ZaminexF/src` found the default view constant
+`IRAN_DEFAULT_CENTER = [35.6892, 53.0]` / `IRAN_DEFAULT_ZOOM = 5` (Tehran area,
+country zoom) in `shared/lib/iranLocations.ts`. Three consumers of the constant:
+
+1. `PropertyMapPicker` (create + edit) — CENTER (3×) + ZOOM (2×).
+2. `PropertyDistributionMap` (dashboard) — CENTER (empty-points fallback) + a
+   hardcoded `5` zoom literal in the same fallback.
+3. `PropertyLocationsMap` (consultant) — CENTER (empty-points fallback) + the
+   same hardcoded `5` zoom literal.
+
+`PropertyLocationMap` (property detail) does **not** use the constant — it
+centres on the property coordinates (`zoom=15`) and returns `null` when the
+property has no coordinates, so it is a fly-to consumer, not a default-view one.
+
+### Fix (minimal diff)
+
+- Renamed `IRAN_DEFAULT_CENTER` → `DEFAULT_VIEW_CENTER` = `[36.4, 53.2]` and
+  `IRAN_DEFAULT_ZOOM` → `DEFAULT_VIEW_ZOOM` = `8` (honest names + new values).
+- Updated all three consumers; replaced the two hardcoded `5` empty-fallback
+  zoom literals with `DEFAULT_VIEW_ZOOM` so the empty dashboard/consultant maps
+  now show Mazandaran at the same zoom as the picker.
+- Fly-to zooms (16/15/12/9/13/8 for real coordinates) untouched.
+
+### Zoom math
+
+Smallest surface is the picker panel (h-64 ≈ 256px). Visible latitude span at
+zoom z ≈ 360 / 2^z → z=8 ≈ 1.4°, z=9 ≈ 0.7°. Mazandaran latitude span ≈ 1.0°
+(bounds 35.9–36.9), so z=8 fits with margin; z=9 would crop it. Centre [36.4,
+53.2] is the exact midpoint of the bounds ((35.9+36.9)/2, (52.1+54.4)/2).
+
+### Verification
+
+- `grep IRAN_DEFAULT` → 0 hits; all consumers reference the renamed constants.
+- Full suite 655 tests, 0 failures. `npm run build` succeeds (new bundle
+  `main-BitvxJ9J.js` replaces `main-Dyvngl7R.js`; CSS unchanged).
+
 ## Stage 3 — cache/AI: stop per-open LLM calls (fingerprint leak)
 
 ### Reproduce (evidence-first)

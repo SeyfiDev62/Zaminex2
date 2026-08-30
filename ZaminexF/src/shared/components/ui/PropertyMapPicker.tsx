@@ -4,8 +4,8 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Search, Crosshair, MapPin, Check, Loader2 } from "lucide-react";
 import {
-  IRAN_DEFAULT_CENTER,
-  IRAN_DEFAULT_ZOOM,
+  DEFAULT_VIEW_CENTER,
+  DEFAULT_VIEW_ZOOM,
   IRAN_PROVINCE_CENTERS,
   resolvePlaceCoordinates,
   type LatLng,
@@ -124,7 +124,7 @@ function PropertyMapPicker({
 
   // Live map centre — the position of the fixed marker. The coordinates
   // rendered under the map and the confirm-button state both follow this.
-  const [center, setCenter] = useState<LatLng>(value ?? IRAN_DEFAULT_CENTER);
+  const [center, setCenter] = useState<LatLng>(value ?? DEFAULT_VIEW_CENTER);
   const centerRef = useRef(center);
   centerRef.current = center;
   const onCenter = useCallback((c: LatLng) => setCenter(c), []);
@@ -208,7 +208,7 @@ function PropertyMapPicker({
       }
 
       if (!name) {
-        if (!value) setFocusTarget({ location: IRAN_DEFAULT_CENTER, zoom: IRAN_DEFAULT_ZOOM });
+        if (!value) setFocusTarget({ location: DEFAULT_VIEW_CENTER, zoom: DEFAULT_VIEW_ZOOM });
         return;
       }
       const kind = districtName ? "district" : cityName ? "city" : "province";
@@ -284,8 +284,8 @@ function PropertyMapPicker({
   const dirty =
     !value || !sameCoord(center[0], value[0]) || !sameCoord(center[1], value[1]);
 
-  const initialCenter: LatLng = value ?? focusTarget?.location ?? IRAN_DEFAULT_CENTER;
-  const initialZoom = value ? 16 : focusTarget?.zoom ?? IRAN_DEFAULT_ZOOM;
+  const initialCenter: LatLng = value ?? focusTarget?.location ?? DEFAULT_VIEW_CENTER;
+  const initialZoom = value ? 16 : focusTarget?.zoom ?? DEFAULT_VIEW_ZOOM;
 
   const consultantIds = useMemo(() => located.map((p) => p.consultantId), [located]);
   const iconCache = useRef(new Map<string, L.DivIcon>());

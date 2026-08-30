@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 import { MapPin } from "lucide-react";
-import { IRAN_DEFAULT_CENTER } from "../../../shared/lib/iranLocations";
+import { DEFAULT_VIEW_CENTER, DEFAULT_VIEW_ZOOM } from "../../../shared/lib/iranLocations";
 import {
   STATUS_FA,
   makePinIcon,
@@ -39,10 +39,10 @@ function PropertyLocationsMap({ points }: { points: MapPoint[] }) {
       const lng = points.reduce((s, p) => s + p.lng, 0) / points.length;
       return [lat, lng];
     }
-    return IRAN_DEFAULT_CENTER;
+    return DEFAULT_VIEW_CENTER;
   }, [points]);
 
-  const zoom = points.length === 1 ? 13 : points.length > 1 ? 8 : 5;
+  const zoom = points.length === 1 ? 13 : points.length > 1 ? 8 : DEFAULT_VIEW_ZOOM;
 
   return (
     <div className="space-y-2">
