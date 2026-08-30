@@ -421,3 +421,13 @@ def _with_host_origins(configured: list[str], hosts: list[str]) -> list[str]:
 
 
 CSRF_TRUSTED_ORIGINS = _with_host_origins(CSRF_TRUSTED_ORIGINS, ALLOWED_HOSTS)
+
+# Under the test runner Django appends "testserver" to ALLOWED_HOSTS at
+# *runtime* (django.test.utils.setup_test_environment) — after this module
+# has already derived CSRF_TRUSTED_ORIGINS from ALLOWED_HOSTS above. That
+# late injection would leave "testserver" as the one allowed host without a
+# matching trusted origin, breaking the invariant that every allowed host
+# can pass the CSRF Origin check. Mirror the injection here so the derived
+# origins stay complete. Test-runner only: production origins are unchanged.
+if sys.argv[1:2] == ["test"]:
+    CSRF_TRUSTED_ORIGINS = _with_host_origins(CSRF_TRUSTED_ORIGINS, ["testserver"])
