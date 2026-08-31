@@ -27,6 +27,28 @@ stage report.
   Persian is a UI-wide change (forms, admin, serializers) — left for a future
   stage; do not do it opportunistically here.
 
+## Stage 16 — final regression sweep + owner's report (verification & docs only)
+
+No feature changes. Sweep evidence:
+
+- **Full Django suite: 697 tests, 0 failures** (matches Stage 15 count exactly).
+- **vitest: 24/24** (`iranLocations.test.ts`).
+- **Build deterministic:** fresh `npm run build` emits `main-CZ8m8iVI.js` +
+  `main-DGkrzoh4.css`; `git status`/`git diff` on `static/frontend/` is empty
+  after the rebuild — byte-identical to the committed bundle.
+- **Working tree clean** after clearing 58 diagnostic media files regenerated
+  by the test runs (Stage 13's 871-file precedent).
+- **Per-bug regression:** re-ran the 8 committed test modules carrying the
+  bugs' assertions (`analytics.test_ai_service`, `basics.test_attribute_admin`,
+  `basics.test_attribute_category`, `basics.test_api`,
+  `common.test_detail_route_visibility`, `common.test_security`,
+  `activity.test_status_persian`, `reports.tests`) — 192 tests, 0 failures.
+  The remaining bugs (1, 3, 4, 5, 6, 10, 14) are frontend/string-only with no
+  dedicated Django class; their proof is the full suite + vitest + build.
+
+Full Persian report committed at `FINAL_REPORT.md` (14-bug table, change
+inventory, consolidated owner checklist, open-items ledger, rebuild recipe).
+
 ## Stage 14 — activity-log status-change entries must be fully Persian
 
 ### Token audit (evidence-first)
