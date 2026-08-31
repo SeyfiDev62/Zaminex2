@@ -532,6 +532,18 @@ def _charts_section(story, styles, charts: dict) -> None:
         _chart_block(story, styles, title, _bar_chart(data, key, color))
 
 
+def _translated_log_description(description: str, target_type: str) -> str:
+    """Persian-ize stored activity descriptions before they hit the PDF.
+
+    Legacy rows hold raw English status codes/labels; the shared translation
+    (``apps.activity.labels``) rewrites them so the exported PDF matches the
+    live activity feed.
+    """
+    from apps.activity.labels import translate_description
+
+    return translate_description(description, target_type)
+
+
 def _logs_section(story, styles, prop) -> None:
     from django.db.models import Q
 
@@ -560,7 +572,10 @@ def _logs_section(story, styles, prop) -> None:
         user = (e.user.get_full_name() or e.user.username) if e.user else "سیستم"
         data.append(
             [
-                Paragraph(t(e.description or "—"), styles["cell"]),
+                Paragraph(
+                    t(_translated_log_description(e.description or "—", e.target_type)),
+                    styles["cell"],
+                ),
                 Paragraph(t(e.get_action_display()), styles["cellCenter"]),
                 Paragraph(t(user), styles["cellCenter"]),
                 Paragraph(t(_jalali(e.created_at, with_time=True)), styles["cellCenter"]),

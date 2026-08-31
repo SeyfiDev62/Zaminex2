@@ -16,6 +16,75 @@ stage report.
   `apps/analytics/views`; (2) if the owner wants the richer listing/follow-up
   columns back in the PDF (start+end date, probability/type/contact), that is a
   trivial follow-up — Stage 9 standardized to the requested column spec.
+- **Stage 13 follow-up:** appraisal download on a non-owned property is 403 by
+  design (sensitive). Future: hide the appraisal section for non-owners rather
+  than show a 403 toast.
+- **Stage 14 follow-up:** the model ``*_display`` choice labels are still
+  English (``Property.Status.AVAILABLE = ("AVAILABLE", "Available")``, and so
+  on for Listing/Task/FollowUp). The activity feed now maps them to Persian via
+  ``apps/activity/labels.py``, but the raw labels remain a pre-existing UI
+  contract the frontend also maps around. Promoting the labels themselves to
+  Persian is a UI-wide change (forms, admin, serializers) — left for a future
+  stage; do not do it opportunistically here.
+
+## Stage 14 — activity-log status-change entries must be fully Persian
+
+### Token audit (evidence-first)
+
+Every ``log_*`` description builder in `apps/activity/signals.py` (post-refactor)
+plus the render sites:
+
+| site | interpolated token | class | action |
+|---|---|---|---|
+| `log_property_save` status-change | `old_status` + `instance.status` (raw codes) | **raw-English label → Persian** | fixed |
+| `log_listing_save` status-change | `instance.get_status_display()` ("Active", "Sold", …) | **English label → Persian** | fixed |
+| property/listing create/update | `title`, `internal_code` | data value → keep | none |
+| `log_task_save` → `build_description` | `STATUS_FA`/`PRIORITY_FA`/`TYPE_FA` | already Persian | verified |
+| `log_followup_save` status/archive | «تکمیل شد»/«ویرایش شد»/«بایگانی شد» | already Persian | verified |
+| `log_followup_save` create | `follow_up_type` (metadata only) | data value → keep | none |
+| `log_consultant_save` | `full_name`, «فعال/غیرفعال» | data value / already Persian | none |
+| appraisal save/delete | `original_filename`, `property.title` | data value → keep | none |
+| `reports/views.py` exports | `title` | data value → keep | none |
+| `tickets/services.py` | `TicketAuditAction.choices` | already Persian | out of scope |
+
+`cache_old_property_status` stores `old.status` (the raw code) in `pre_save`;
+`log_property_save` then interpolates it raw — that is the property bug. The
+listing bug is `get_status_display()` returning the English label. Task and
+follow-up descriptions were already Persian.
+
+### Per-model choice-label evidence
+
+All four vocabularies' ``*_display`` labels are **English** (Property
+"Available/Reserved/Sold/Archived"; Listing "Draft/Active/Paused/Sold/Expired/
+Archived"; Task "Pending/…"/"Low/…"/"Viewing/…"; FollowUp "Call/…"/
+"Scheduled/Completed"). Decision: **do NOT change the labels** — UI blast
+radius (frontend maps them itself in `shared/lib/utils.ts`, and forms/admin/
+serializers read them). Use a display-time Persian map; flagged as a future
+stage (Open items).
+
+### Fix (minimal diff)
+
+- New `apps/activity/labels.py` — single source of Persian labels (mirrored
+  from the frontend). ``_choice_tokens`` derives the token set from each
+  model's ``TextChoices`` (code **and** label → Persian) so the recognised set
+  cannot drift from the schema. ``status_label`` for writing;
+  ``translate_description`` for rendering (word-boundary regex; unknown values
+  pass through untouched).
+- `apps/activity/signals.py` — property status-change interpolates
+  `status_label("property", old/new)`; listing status-change interpolates
+  `status_label("listing", instance.status)` instead of `get_status_display()`.
+- Render sites — `apps/activity/views.py` list endpoint wraps `log.description`
+  in `translate_description(log.description, log.target_type)`; `pdf.py`
+  `_logs_section` does the same via `_translated_log_description` before `t()`.
+- No frontend change — `ActivityLogPage.tsx` renders `act.description` verbatim,
+  so the fix is server-side.
+
+### Verification
+
+11 new tests (4 new-row, 2 legacy-row via list endpoint, 4 unit, 1 PDF
+story-level `assertNotIn` raw ASCII — `t()` passes ASCII through, so a failed
+translation leaves it literal). Full suite **697 tests, 0 failures** (was 686).
+`npm run build` OK — bundle `main-Bn6E-9Vl.js`.
 
 ## Stage 9 — property PDF: empty-failure hardening + AI section + log tables
 

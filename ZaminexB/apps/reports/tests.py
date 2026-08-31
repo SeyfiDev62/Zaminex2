@@ -505,6 +505,33 @@ class PropertyPdfEmptyHistoryTests(TestCase):
         ):
             self.assertIn(t(placeholder), rendered)
 
+    def test_legacy_english_log_rows_render_persian(self):
+        """Legacy rows holding raw English status codes render Persian in the PDF.
+
+        ``t()`` passes pure ASCII through untouched, so if the shared
+        translator failed, the raw codes would remain literal ASCII in the
+        rendered text — the assertion below catches exactly that.
+        """
+        ActivityLog.objects.filter(
+            target_type=ActivityLog.TargetType.PROPERTY, target_id=self.prop.pk
+        ).delete()
+        ActivityLog.objects.create(
+            user=self.agent,
+            action="status_change",
+            target_type="property",
+            target_id=self.prop.pk,
+            description="وضعیت ملک «Empty» از AVAILABLE به RESERVED تغییر کرد",
+        )
+
+        story = []
+        styles = _styles()
+        _logs_section(story, styles, self.prop)
+
+        rendered = [flow.text for flow in story if hasattr(flow, "text")]
+        joined = "\n".join(rendered)
+        for token in ("AVAILABLE", "RESERVED", "Available", "Reserved"):
+            self.assertNotIn(token, joined)
+
 
 class PropertyPdfAiSectionTests(TestCase):
     """The AI section appears when available and is omitted otherwise —
