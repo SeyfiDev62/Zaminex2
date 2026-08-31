@@ -1160,10 +1160,13 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     }
   }, [initialData.csrfToken, fetchProperties]);
 
-  const deleteProperty = useCallback(async (id: string) => {
+  const deleteProperty = useCallback(async (id: string): Promise<boolean> => {
     try {
       const res = await apiFetch(`/properties/api/properties/${id}/`, { method: "DELETE" }, initialData.csrfToken);
-      if (!res.ok) throw new Error("خطا در حذف ملک");
+      if (!res.ok) {
+        const data = await readJson(res);
+        throw new Error(apiErrorMessage(data, "خطا در حذف ملک"));
+      }
       toast({ type: "success", message: "ملک حذف شد." });
       // Drop the row from the in-memory combobox list immediately so the UI
       // updates in the same tick — the refetch below only re-syncs (and may
@@ -1172,8 +1175,10 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
       setProperties((prev) => prev.filter((p) => String(p.id) !== String(id)));
       await fetchProperties();
       setPage("properties");
+      return true;
     } catch (err: any) {
       toast({ type: "error", message: err?.message || "خطای ناشناخته" });
+      return false;
     }
   }, [initialData.csrfToken, fetchProperties]);
 

@@ -134,6 +134,86 @@ PDF allowed them — the three formats disagreed.
 - Full Django suite: **671 tests, 0 failures** (was 669; +2).
 - Frontend: `npm run build` OK (new bundle `main-f9XSwRwH.js`); vitest 24/24.
 
+## Stage 11 — deleting a property removes its row from the list in the same tick
+
+### Diagnosis (evidence-first) — which mechanism is live
+
+Two candidate mechanisms were examined.
+
+**Mechanism (a) — page-local state never updated on delete — CONFIRMED (sole root cause).**
+
+Data-flow trace (before the fix):
+
+1. The admin list `PropertiesPage` renders rows from its **own** local state
+   `serverProperties`, populated by `fetchServerProperties()` (server-side
+   pagination: GET `/properties/api/properties/?page=N&page_size=20`). The
+   `properties` prop is destructured as `initialProperties` and **never read**
+   (grep: only `initialLoading` is used) — the list does not derive from App
+   state at all.
+2. «حذف» in the row action menu → `setConfirmDelete(id)` → `<ConfirmModal
+   onConfirm>` → `onDelete(id)` = App `deleteProperty`.
+3. `deleteProperty` DELETEs, toasts success, updates App-level `properties`
+   (the combobox list used by wizards/follow-ups/filters), re-fetches it, and
+   `setPage("properties")` (a no-op — we are already on that page).
+4. `PropertiesPage.serverProperties` is **never touched**, and
+   `fetchServerProperties` is **not re-triggered** (its deps — currentPage /
+   pageSize / search / filters / propertyTypeRef / attrValues / csrfToken —
+   are unchanged). The deleted row therefore stays visible until a manual F5
+   remounts the page and re-runs the fetch. Exactly the reported symptom.
+
+**Mechanism (b) — stale HTTP cache re-inserting the row — DISPROVEN (not live).**
+
+Captured the real response headers of the authenticated properties LIST GET
+(`django.test.Client`, `HTTP_HOST=localhost`, `force_login(admin)`):
+
+```
+status 200
+Cache-Control = 'no-store, no-cache, must-revalidate, max-age=0'
+Pragma        = 'no-cache'
+ETag          = None
+Last-Modified = None
+Expires       = None
+Vary          = 'Accept, Cookie'
+```
+
+`SecurityHeadersMiddleware` (`apps/common/middleware.py`) already sets
+`Cache-Control: no-store` on every authenticated response, so the browser never
+serves a stale list and a deleted row cannot be re-inserted from cache. No
+server-side cache defect — **no backend change needed**.
+
+### Fix (minimal diff, frontend only)
+
+- `App.tsx` `deleteProperty` — now returns `true` on success / `false` on
+  failure (so the page knows the outcome without an event bus), and reads the
+  server's error message via `apiErrorMessage` (was a generic «خطا در حذف ملک»).
+  App-level `setProperties` + `fetchProperties` + toast all stay.
+- `PropertiesPage.tsx`:
+  - `fetchServerProperties` GET now sends `cache: "no-store"` (belt-and-suspenders;
+    matches `fetchProperties`).
+  - New `applyLocalRemoval(ids)` helper: on confirmed success removes the
+    row(s) from `serverProperties` in the same tick, decrements `totalCount`,
+    clears the ids from `selected`, then either steps the page back (if the
+    whole current page just emptied and `currentPage > 1` → the effect re-fetches
+    the now-last page) or re-fetches (no-store) to re-sync shifted rows.
+  - Single-row ConfirmModal and the table bulk-delete now `await onDelete(id)`
+    and only mutate locally when it returned `true` — a failed delete leaves the
+    row untouched (App already toasted the server message).
+- `types.ts` — `PropertiesPageProps.onDelete` widened `(id: string) => void` →
+  `(id: string) => Promise<boolean>` (supporting type change).
+
+### Pagination edge note
+
+The addenda referenced the tickets list as the reference UX for the step-back,
+but **no step-back exists anywhere** — `TicketsPage.tsx` (lines 924–925, 959–1011,
+1119) paginates server-side via a plain `<Pagination page={listPage} total={total}
+…>` with no clamp, and it has no delete action at all (grep `حذف`/`DELETE` → only
+a recipient-removal `X`). The standard step-back was implemented directly here.
+
+### Verification
+
+- Full Django suite: **671 tests, 0 failures** (no backend change).
+- Frontend: `npm run build` OK (new bundle `main-DrLSEzf0.js`); vitest 24/24.
+
 ## Stage 8 — attribute management: real delete, instant add, consistent lists
 
 ### Diagnostic matrix (evidence-first, dev DB via `django.test.Client`)
