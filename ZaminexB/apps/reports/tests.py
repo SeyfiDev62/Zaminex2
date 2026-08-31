@@ -650,3 +650,85 @@ class PropertyPdfFontFailureTests(TestCase):
             self.assertFalse(res.content.startswith(b"%PDF-"))
         finally:
             self.font_path.write_bytes(self._original_bytes)
+
+
+# ---------------------------------------------------------------------------
+#  Stage 10 — consultants may report on their own AND shared properties
+# ---------------------------------------------------------------------------
+
+class PropertyReportAccessMatrixTests(TestCase):
+    """One canonical access rule across JSON, CSV and PDF.
+
+    A consultant may report on a property they own or that is shared with
+    them (``is_shared``); anything else is 403. Admin sees everything. The
+    three formats must agree on the same status for every (user, property).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="mx-admin", password="x" * 10, role=UserRole.ADMIN
+        )
+        cls.a = User.objects.create_user(
+            username="mx-a", password="x" * 10, role=UserRole.AGENT, first_name="A", last_name="X"
+        )
+        cls.b = User.objects.create_user(
+            username="mx-b", password="x" * 10, role=UserRole.AGENT, first_name="B", last_name="X"
+        )
+        cls.c = User.objects.create_user(
+            username="mx-c", password="x" * 10, role=UserRole.AGENT, first_name="C", last_name="X"
+        )
+        for user in (cls.a, cls.b, cls.c):
+            ConsultantProfile.objects.create(user=user, full_name=user.first_name, branch="x")
+
+        def mk(title, code, owner, shared=False):
+            return Property.objects.create(
+                title=title, internal_code=code, consultant=owner,
+                property_type=Property.PropertyType.APARTMENT,
+                deal_type=Property.DealType.SALE,
+                price=Decimal("1000000000"), area=100, rooms=2,
+                address="addr", neighborhood="n", is_shared=shared,
+            )
+
+        cls.p1 = mk("P1", "P1", cls.a, shared=False)   # A-owned, not shared
+        cls.p2 = mk("P2", "P2", cls.a, shared=True)    # A-owned, shared
+        cls.p3 = mk("P3", "P3", cls.b, shared=False)   # B-owned, not shared
+
+    def _statuses(self, user, prop):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return (
+            client.get(f"/api/reports/properties/{prop.pk}/").status_code,
+            client.get(f"/api/reports/properties/{prop.pk}/export/").status_code,
+            client.get(f"/api/reports/properties/{prop.pk}/export-pdf/").status_code,
+        )
+
+    def test_access_matrix_is_consistent_across_formats(self):
+        matrix = [
+            (self.a, self.p1, 200),
+            (self.a, self.p2, 200),
+            (self.a, self.p3, 403),
+            (self.b, self.p1, 403),
+            (self.b, self.p2, 200),
+            (self.b, self.p3, 200),
+            (self.c, self.p1, 403),
+            (self.c, self.p2, 200),
+            (self.c, self.p3, 403),
+        ]
+        for user, prop, expected in matrix:
+            with self.subTest(user=user.username, property=prop.internal_code):
+                json_status, csv_status, pdf_status = self._statuses(user, prop)
+                self.assertEqual(json_status, expected)
+                self.assertEqual(csv_status, expected)
+                self.assertEqual(pdf_status, expected)
+                # The consistency assertion is the point of this stage.
+                self.assertEqual(json_status, csv_status)
+                self.assertEqual(csv_status, pdf_status)
+
+    def test_admin_can_access_every_property(self):
+        for prop in (self.p1, self.p2, self.p3):
+            with self.subTest(property=prop.internal_code):
+                json_status, csv_status, pdf_status = self._statuses(self.admin, prop)
+                self.assertEqual(json_status, 200)
+                self.assertEqual(csv_status, 200)
+                self.assertEqual(pdf_status, 200)

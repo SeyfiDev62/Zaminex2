@@ -532,7 +532,8 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
                     گزارش کامل این ملک شامل ۱۵ شاخص کلیدی، نمودارها و خروجی CSV در صفحه اختصاصی گزارش‌ها در دسترس است.
                   </p>
                 </div>
-                {openPropertyReport && (
+                {/* Mirror can_access_property: admin / owner / shared only. */}
+                {openPropertyReport && canViewPrivateInfo && (
                   <Btn variant="primary" size="sm" onClick={() => openPropertyReport(String(property.id))}>
                     <BarChart3 size={13} />مشاهده گزارش کامل
                   </Btn>

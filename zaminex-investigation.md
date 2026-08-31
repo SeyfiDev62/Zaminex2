@@ -10,6 +10,12 @@ stage report.
   sandbox). On a real-internet machine, pick a real Mazandaran district that
   exists in OSM and confirm the camera lands on it, then record the result
   here. One-liner for the report font (Stage 9) is kept below.
+- **Stage 9 follow-ups (owner decision, future):** (1) if a second consumer
+  appears, promote AI data assembly to a shared module (e.g.
+  `apps/analytics/data.py`) instead of importing `_property_ai_data` from
+  `apps/analytics/views`; (2) if the owner wants the richer listing/follow-up
+  columns back in the PDF (start+end date, probability/type/contact), that is a
+  trivial follow-up — Stage 9 standardized to the requested column spec.
 
 ## Stage 9 — property PDF: empty-failure hardening + AI section + log tables
 
@@ -79,6 +85,54 @@ message, no Persian detail, and no protection against a half-rendered/blank page
 - Font integrity one-liner for the user's machine:
   `sha256sum "ZaminexB/static/fonts/ttf/IRAN Rounded.ttf"` — expect
   `1fd361ec4e71e27bbcbc315dbad80aec783c02be027c22eaab969703485e0b39`.
+
+## Stage 10 — consultants can report on own AND shared properties
+
+### Diagnosis (evidence-first)
+
+Two access rules coexisted for the property report. Reproduced directly:
+`can_access_property(B, P2) == True` (the canonical rule — shared ⇒ accessible)
+while `get_property_for_user_or_403(B, P2)` raised `PermissionDenied` (its own
+ad-hoc `consultant_id == user.pk` check ignored `is_shared`).
+
+Caller enumeration of `get_property_for_user_or_403` (grep across the repo):
+1. `apps/reports/views.py:48` — inside `PropertyReportView._report()`, which
+   serves **both** the JSON endpoint (`PropertyReportView.get`) and the CSV
+   endpoint (`PropertyReportExportView.get`, which instantiates the view and
+   calls `view._report`).
+2. `apps/reports/tests.py` — unit test usages only.
+
+Every caller is report-context and should receive the shared-access rule. The
+PDF endpoint (`PropertyReportPdfView`) does **not** use the helper — it already
+calls `can_access_property` directly, which is exactly the rule the helper now
+delegates to.
+
+### Root cause
+
+`get_property_for_user_or_403` re-implemented its own rule
+(`role != ADMIN and consultant_id != user.pk`) instead of delegating to the
+canonical `can_access_property`, so JSON + CSV denied shared properties while
+PDF allowed them — the three formats disagreed.
+
+### Fix (minimal diff)
+
+- `apps/reports/services.py` — `get_property_for_user_or_403` now delegates to
+  `apps.common.access.can_access_property` (admin → any; consultant → own OR
+  shared; unauthenticated → denied). One line + docstring. JSON/CSV/PDF now all
+  flow through the single canonical rule.
+- `PropertyDetail.tsx` — the «مشاهده گزارش کامل» button was un-gated (always
+  visible); now gated on `canViewPrivateInfo` (= admin | own | shared, the FE
+  mirror of `can_access_property`) so a non-accessible property shows no report
+  entry. `PropertyReportsPage.tsx` **already** renders a 403 as a graceful
+  error card (`apiErrorMessage` → red card) — no change needed there.
+
+### Verification
+
+- New `PropertyReportAccessMatrixTests` (2 tests): full user×property×format
+  matrix (A/B/C × P1/P2/P3 × JSON/CSV/PDF) asserting the expected status AND
+  that the three formats agree on every cell; plus admin-sees-all.
+- Full Django suite: **671 tests, 0 failures** (was 669; +2).
+- Frontend: `npm run build` OK (new bundle `main-f9XSwRwH.js`); vitest 24/24.
 
 ## Stage 8 — attribute management: real delete, instant add, consistent lists
 

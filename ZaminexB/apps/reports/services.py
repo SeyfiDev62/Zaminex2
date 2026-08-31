@@ -41,6 +41,7 @@ from django.db.models.functions import Coalesce, TruncDate
 from django.utils import timezone
 
 from apps.accounts.models import ConsultantProfile, UserRole
+from apps.common.access import can_access_property
 from apps.followups.models import FollowUp, FollowUpStatus
 from apps.listings.models import Listing
 from apps.properties.models import Property, PropertyImage
@@ -142,14 +143,20 @@ def accessible_properties(user) -> Any:
 
 
 def get_property_for_user_or_403(user, property_id: int) -> Property:
-    """Return the property if the user can access it; otherwise raise PermissionError."""
+    """Return the property if the user can access it; otherwise raise PermissionError.
+
+    Delegates the access decision to :func:`apps.common.access.can_access_property`
+    — the single canonical rule (admin → any; consultant → own OR shared;
+    unauthenticated → denied) — so the JSON, CSV and PDF exports all agree and
+    a consultant can report on shared properties exactly as on their own.
+    """
     qs = Property.objects.select_related("consultant")
     qs = qs.prefetch_related("images", "tasks", "followups", "listings")
     obj = qs.filter(pk=property_id).first()
     if obj is None:
         from django.core.exceptions import PermissionDenied
         raise PermissionDenied("ملک مورد نظر وجود ندارد یا به آن دسترسی ندارید.")
-    if getattr(user, "role", None) != "ADMIN" and obj.consultant_id != user.pk:
+    if not can_access_property(user, obj):
         from django.core.exceptions import PermissionDenied
         raise PermissionDenied("شما به گزارش این ملک دسترسی ندارید.")
     return obj
