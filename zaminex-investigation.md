@@ -278,6 +278,68 @@ Third tab «دسته‌بندی ویژگی‌ها» in `AttributesPage.tsx`:
 - `npm run build` OK (bundle `main-DiLqo31d.js`); vitest 24/24 (no new helper
   warranted a vitest test — the grouping is an inline `filter`).
 
+## Stage 13 — other consultants' properties: images render, «جزئیات» hidden, tabs locked
+
+### Diagnostic matrix (evidence-first, dev DB via `django.test.Client`)
+
+Fixtures 17 (consultant B's own property), 18 (consultant A's non-shared
+property), 19 (A's shared property) — each with images, an appraisal PDF, and an
+avatar on A's profile. Probed as consultant B and as admin with `scope=all`:
+
+| case | LIST JSON `imageUrl` | media GET (B) | media GET (admin) | classification |
+|---|---|---|---|---|
+| B → own property image | present | 200 | 200 | (d) n/a — works |
+| B → A's non-shared image | **present** | **403** | 200 | **(b) media 403** |
+| B → A's shared image | present | 200 | 200 | works |
+| B → A's appraisal PDF (non-shared) | — | 403 | 200 | sensitive: correct |
+| B → A's avatar | — | 403 | 200 | own-only: correct |
+| anonymous → any media | — | 403 | — | denied |
+
+The single failure is **(b)**: the serializer already includes `imageUrl` for
+every `scope=all` viewer, but the media endpoint returned 403 for a non-owner /
+non-shared property image. No (a) serializer-omission, no (c) 404, no (d).
+
+### Root cause
+
+`_can_access_media` (`apps/common/media.py`) gated property images behind
+`prop.consultant_id == user.pk or prop.is_shared`. Property images are part of
+the property *read* model — the «همه املاک» list and the detail page hand the
+same URL to every authenticated consultant — so the media 403 was an
+inconsistency between the API payload and the media endpoint.
+
+### Fix (minimal diff)
+
+- `apps/common/media.py`: property-image branch now
+  `return PropertyImage.objects.filter(image=rel_path).exists()` — any
+  **authenticated** user may load a property image; the existence check still
+  blocks arbitrary path guessing. Docstring rewritten with the full boundary.
+- **Unchanged byte-for-byte:** appraisal-PDF branch (admin / assigned
+  consultant / shared — sensitive documents), consultant-avatar branch (own
+  only), admin-avatar branch (never to consultants), and the `_safe_relative_path`
+  traversal guard.
+- `PropertyDetail.tsx`: new `isOwn = role === "admin" ||
+  String(consultantId) === String(currentUserId)`. When NOT `isOwn`:
+  consultant-section «جزئیات» button hidden; the three tabs (آگهی‌ها / وظایف /
+  پیگیری‌ها) render a centred lock `EmptyState` (mirrors the existing
+  "به‌زودی" EmptyState already in the same file) with exact sentences
+  «شما به آگهی‌های این ملک دسترسی ندارید» / «شما به وظایف این ملک دسترسی
+  ندارید» / «شما به پیگیری‌های این ملک دسترسی ندارید». Gallery and report
+  button and appraisal section untouched.
+
+### Verification
+
+- `ProtectedMediaTests` expanded to 10 tests: B→A's image **200**; B→A's
+  appraisal PDF **403** (owner/admin 200); B→A's avatar **403** (owner/admin
+  200); unknown path 403; owner/admin/shared/anon cases kept.
+- Full Django suite: **686 tests, 0 failures** (was 681; +5).
+- `npm run build` OK (bundle `main-Bn6E-9Vl.js`).
+
+### Follow-up (flagged, NOT implemented)
+
+Appraisal download on a non-owned property is 403 by design (sensitive). For a
+future stage: hide the appraisal section for non-owners rather than show a
+403 toast.
+
 ## Stage 8 — attribute management: real delete, instant add, consistent lists
 
 ### Diagnostic matrix (evidence-first, dev DB via `django.test.Client`)

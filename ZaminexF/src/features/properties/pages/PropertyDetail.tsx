@@ -168,6 +168,14 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
     role === "consultant" &&
     currentUserId != null &&
     String(property?.consultantId ?? property?.consultant ?? "") === String(currentUserId);
+  // `isOwn` = the viewer is this property's owner (admin or its assigned
+  // consultant). A shared property owned by someone else is NOT own for the
+  // viewer: the owner's listings/tasks/follow-ups and their profile stay
+  // private, mirroring the server-side scoping of those sub-resources.
+  const isOwn =
+    role === "admin" ||
+    (currentUserId != null &&
+      String(property?.consultantId ?? property?.consultant ?? "") === String(currentUserId));
   const canModifyProperty = role === "admin" || isOwnerProperty || isSharedProperty;
   const canManageProperty = role === "admin" || isOwnerProperty;
   const canViewPrivateInfo = canModifyProperty;
@@ -187,9 +195,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
   // Download rights mirror the gallery images: admins, the assigned
   // consultant, and every consultant while the property is shared.
   const canDownloadAppraisal = canManageAppraisal || isSharedProperty;
-  const showConsultantDetails = Boolean(
-    consultantRef && (role === "admin" || (role === "consultant" && !isSharedProperty))
-  );
+  const showConsultantDetails = Boolean(consultantRef && isOwn);
   const openConsultantDetails = () => {
     if (!showConsultantDetails) return;
     if (role === "admin") navigate("consultants", consultantRef as string | number);
@@ -564,6 +570,15 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
         )}
 
         {tab === "آگهی‌ها" && (
+          !isOwn ? (
+            <div className="max-w-5xl">
+              <EmptyState
+                icon={<Lock size={28} />}
+                title="دسترسی محدود"
+                description="شما به آگهی‌های این ملک دسترسی ندارید"
+              />
+            </div>
+          ) : (
           <div className="max-w-5xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">آگهی‌های این ملک</h3>
@@ -669,9 +684,19 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
               </div>
             )}
           </div>
+          )
         )}
 
         {tab === "وظایف" && (
+          !isOwn ? (
+            <div className="max-w-5xl">
+              <EmptyState
+                icon={<Lock size={28} />}
+                title="دسترسی محدود"
+                description="شما به وظایف این ملک دسترسی ندارید"
+              />
+            </div>
+          ) : (
           <div className="max-w-5xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">وظایف مرتبط با این ملک</h3>
@@ -716,9 +741,19 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
               </div>
             )}
           </div>
+          )
         )}
 
         {tab === "پیگیری‌ها" && (
+          !isOwn ? (
+            <div className="max-w-5xl">
+              <EmptyState
+                icon={<Lock size={28} />}
+                title="دسترسی محدود"
+                description="شما به پیگیری‌های این ملک دسترسی ندارید"
+              />
+            </div>
+          ) : (
           <div className="max-w-5xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold">پیگیری‌های این ملک</h3>
@@ -764,6 +799,7 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
               </div>
             )}
           </div>
+          )
         )}
 
         {tab !== "نمای کلی" && tab !== "گالری" && tab !== "آگهی‌ها" && tab !== "وظایف" && tab !== "پیگیری‌ها" && tab !== "گزارش" && tab !== "گزارش کارشناسی" && (
