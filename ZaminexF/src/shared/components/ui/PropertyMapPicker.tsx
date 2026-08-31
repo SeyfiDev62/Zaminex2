@@ -6,7 +6,6 @@ import { Search, Crosshair, MapPin, Check, Loader2 } from "lucide-react";
 import {
   DEFAULT_VIEW_CENTER,
   DEFAULT_VIEW_ZOOM,
-  IRAN_PROVINCE_CENTERS,
   resolvePlaceCoordinates,
   type LatLng,
 } from "../../lib/iranLocations";
@@ -206,15 +205,23 @@ function PropertyMapPicker({
         return;
       }
       const kind = districtName ? "district" : cityName ? "city" : "province";
-      const resolved = await resolvePlaceCoordinates(name, kind, { provinceName, cityName });
+      const resolved = await resolvePlaceCoordinates(
+        name,
+        kind,
+        { provinceName, cityName },
+        { variants: true }
+      );
       if (cancelled) return;
       if (resolved) {
         const zoom = districtName ? 15 : cityName ? 12 : 8;
         setFocusTarget({ location: resolved, zoom });
-      } else if (!value && provinceName) {
-        // fallback to the province centre when a district/city lookup fails
-        const p = IRAN_PROVINCE_CENTERS[provinceName];
-        if (p) setFocusTarget({ location: p, zoom: 9 });
+      } else if (kind !== "province") {
+        // NO-MOVE fallback: city/district resolution failed (offline / not
+        // found) — do NOT fly anywhere; show the short auto-dismissing notice
+        // instead. Province still zooms from the static table (no internet).
+        if (noResultTimer.current) clearTimeout(noResultTimer.current);
+        setSearchNoResult(true);
+        noResultTimer.current = setTimeout(() => setSearchNoResult(false), 7000);
       }
     };
     run();

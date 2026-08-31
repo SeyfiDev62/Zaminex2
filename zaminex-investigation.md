@@ -3,6 +3,54 @@
 Per-stage root-cause evidence. Essential findings are also reproduced in each
 stage report.
 
+## Stage 7 — precise province/city/district zoom (geocoding) + NO-MOVE fallback
+
+### Diagnosis (evidence-first)
+
+Nominatim reachability: `https://nominatim.openstreetmap.org` is **unreachable
+from the sandbox** (`curl` → SSL_ERROR_SYSCALL on 443, empty reply on 80) while
+general egress (PyPI) works — so REAL-mode walk-through was impossible; MOCK-mode
+committed tests used instead.
+
+Suspect classification (code + seed-data analysis):
+- **(i) display-name vs OSM-name mismatch / thin coverage — CONFIRMED.** The
+  seed tree (مازندران → ساری) exposes محله display names like `بلوار کشاورز`
+  (a boulevard, not a neighbourhood), `مرکزی` ("central", generic), `آزادی`
+  ("freedom", generic), `میدان ساعت` (a square), and `Daryashahr` (Latin
+  script). These are exactly the inputs the resolver sends verbatim, and small
+  محلهs have thin/no OSM coverage.
+- **(ii) bounded viewbox too tight — CONFIRMED (contributing).** halfLat 1.6 /
+  halfLng 2.6 can exclude edge-of-province places; widened to 2.2 / 3.5.
+- **(iii) 1 req/s queue + 429 — NOT the primary cause.** The queue enforces
+  ≥1.1 s and retries 429 once; only city+district geocode (province is static).
+- **(iv) context wiring defect — DISPROVED.** `LocationSelect` disables city
+  without province and district without city; `onProvinceChange` resets
+  city+district, `onCityChange` resets district. No stale-parent path exists.
+
+### Fix (iranLocations.ts + PropertyMapPicker.tsx)
+
+- **Variant ladder** (`buildQueryVariants`): district → "d c p" → "d p" → "d";
+  city → "c p" → "c". Free-text search (no `variants` option) keeps the single
+  qualified query, bounded→unbounded, no ladder (today's behaviour).
+- **Viewbox** widened to halfLat 2.2 / halfLng 3.5; `bounded=1` dropped when the
+  variant is fully qualified (parents already in the query).
+- **Acceptance rule** (`acceptsResult`): fully qualified → accept top hit;
+  partially qualified → hard-reject only a clear mismatch (address names a
+  different known Persian province); missing/English-only address → accept.
+- **NO-MOVE fallback**: removed the picker's fly-to-province-centre fallback and
+  the resolver's static-city-table fallback; on city/district failure the picker
+  shows the short auto-dismissing `searchNoResult` notice and does not move.
+  Province still zooms from the static table (no internet).
+- **Tests**: added `vitest@^3.2.7` (dev-only) + `npm run test` script +
+  `src/shared/lib/iranLocations.test.ts` (24 tests, fetch mocked, deterministic).
+
+### Verification
+
+- vitest: 24/24 pass (variant order, acceptance rule, 429 retry, offline → null,
+  search single-query, province static-no-network).
+- Django suite: 655/0. `npm run build` OK (bundle `main-BYUBwS0S.js`, CSS
+  unchanged). No backend diff; no new runtime deps (vitest is dev-only).
+
 ## Environment rebuild (canonical — run verbatim after any sandbox wipe)
 
 A wipe removes `.venv/`, `ZaminexF/node_modules/`, `/home/user/pg/` (PostgreSQL)
@@ -24,7 +72,8 @@ Recovery order:
    `CREATE DATABASE zaminex` + `ALTER USER zaminex WITH PASSWORD 'zaminex'`;
    restore `zaminex_backup.sql` after stripping the `\restrict`/`\unrestrict`
    lines; `manage.py migrate` + `manage.py check`.
-4. **Frontend** — `npm install` in `ZaminexF`.
+4. **Frontend** — `npm install` in `ZaminexF` (installs the `vitest` devDependency
+   added in Stage 7; run `npm run test` for the resolver suite).
 5. **Baseline gate** — `manage.py test apps` must be **655/0** before any code
    edit. `export DATABASE_URL=postgres://zaminex:zaminex@127.0.0.1:5432/zaminex`
    and `export LD_LIBRARY_PATH=/home/user/pg/pginstall/lib` first.

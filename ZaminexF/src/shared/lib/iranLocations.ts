@@ -119,15 +119,14 @@ async function nominatimFetch(url: string): Promise<Response> {
 }
 
 /** Coarse bounding box around a known province centre, as Nominatim's
- * `viewbox` parameter (west,north,east,south). Generous enough for Iran's
- * large provinces; a place just outside still resolves via the unbounded
- * follow-up below. */
+ * `viewbox` parameter (west,north,east,south). Widened (halfLat 2.2 /
+ * halfLng 3.5) so places near a province edge still rank correctly. */
 function provinceViewbox(provinceName?: string): string | null {
   const c = provinceName ? IRAN_PROVINCE_CENTERS[provinceName.trim()] : null;
   if (!c) return null;
   const [lat, lng] = c;
-  const halfLat = 1.6;
-  const halfLng = 2.6;
+  const halfLat = 2.2;
+  const halfLng = 3.5;
   return [
     (lng - halfLng).toFixed(2),
     (lat + halfLat).toFixed(2),
@@ -136,92 +135,167 @@ function provinceViewbox(provinceName?: string): string | null {
   ].join(",");
 }
 
+/** A top hit from Nominatim, with its `address` kept for the acceptance rule. */
+export type GeocodeHit = {
+  lat: number;
+  lon: number;
+  address?: Record<string, string>;
+};
+
+/** One queued Nominatim request. `bounded` adds `bounded=1` (keep the result
+ * inside the viewbox). Returns the top hit or null (offline / not found). */
 async function nominatimSearch(
   query: string,
-  viewbox: string | null
-): Promise<LatLng | null> {
+  viewbox: string | null,
+  bounded: boolean
+): Promise<GeocodeHit | null> {
   try {
-    const build = (bounded: boolean) => {
-      const url = new URL("https://nominatim.openstreetmap.org/search");
-      url.searchParams.set("q", query);
-      url.searchParams.set("countrycodes", "ir");
-      url.searchParams.set("format", "jsonv2");
-      url.searchParams.set("limit", "1");
-      if (viewbox) {
-        url.searchParams.set("viewbox", viewbox);
-        if (bounded) url.searchParams.set("bounded", "1");
+    const url = new URL("https://nominatim.openstreetmap.org/search");
+    url.searchParams.set("q", query);
+    url.searchParams.set("countrycodes", "ir");
+    url.searchParams.set("format", "jsonv2");
+    url.searchParams.set("limit", "1");
+    if (viewbox) {
+      url.searchParams.set("viewbox", viewbox);
+      if (bounded) url.searchParams.set("bounded", "1");
+    }
+    const res = await nominatimFetch(url.toString());
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (Array.isArray(data) && data.length > 0) {
+      const lat = parseFloat(data[0].lat);
+      const lon = parseFloat(data[0].lon);
+      if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+        return { lat, lon, address: data[0].address || undefined };
       }
-      return url.toString();
-    };
-    for (const bounded of viewbox ? [true, false] : [false]) {
-      const res = await nominatimFetch(build(bounded));
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        const lat = parseFloat(data[0].lat);
-        const lon = parseFloat(data[0].lon);
-        if (!Number.isNaN(lat) && !Number.isNaN(lon)) return [lat, lon];
-      }
-      if (!viewbox) break;
     }
   } catch {
-    // offline / blocked → fall through to null (caller uses parent center)
+    // offline / blocked → null (caller applies the NO-MOVE fallback)
   }
   return null;
 }
 
 /**
+ * Ordered query variants for a structured selection (most specific first).
+ * A repeated name (a محله that exists in many cities) ranks its selected
+ * parents first; the bare name is the last resort.
+ */
+export function buildQueryVariants(
+  name: string,
+  kind: "city" | "district",
+  context?: { provinceName?: string; cityName?: string }
+): string[] {
+  const clean = (name || "").trim();
+  const province = context?.provinceName?.trim();
+  const city = context?.cityName?.trim();
+  if (!clean) return [];
+  const variants: string[] = [];
+  if (kind === "district") {
+    if (city && province) variants.push(`${clean}, ${city}, ${province}`);
+    if (province) variants.push(`${clean}, ${province}`);
+  } else if (province) {
+    variants.push(`${clean}, ${province}`);
+  }
+  variants.push(clean);
+  return variants;
+}
+
+/** A variant is "fully qualified" when it embeds every selected parent, so
+ * Nominatim's own ranking (not `bounded=1`) keeps the result in-province. */
+export function variantIsFullyQualified(
+  variant: string,
+  kind: "city" | "district",
+  context?: { provinceName?: string; cityName?: string }
+): boolean {
+  const province = context?.provinceName?.trim();
+  const city = context?.cityName?.trim();
+  if (kind === "district") {
+    return (!city || variant.includes(city)) && (!province || variant.includes(province));
+  }
+  return !province || variant.includes(province);
+}
+
+/**
+ * Acceptance rule for a structured-selection hit (keep it simple):
+ *  - fully qualified query → accept the top hit (ranking already correct);
+ *  - partially qualified → hard-reject only a *clear* mismatch: the hit's
+ *    jsonv2 `address` names a different known province (Persian). Missing
+ *    address info and English-only labels (which we cannot transliterate) are
+ *    treated as "no clear mismatch" → accept.
+ */
+export function acceptsResult(
+  hit: GeocodeHit,
+  province: string | undefined,
+  fullyQualified: boolean
+): boolean {
+  if (fullyQualified) return true;
+  if (!province) return true;
+  const values = Object.values(hit.address || {}).map((v) => String(v).trim());
+  if (values.length === 0) return true;
+  for (const value of values) {
+    for (const other of Object.keys(IRAN_PROVINCE_CENTERS)) {
+      if (other !== province && value === other) return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Resolve a place name to coordinates.
  *
- * Accuracy rules (the map must land on *the* selected place, not a same-named
- * one elsewhere):
- *  - A **city** is always resolved against its selected province first
- *    (Nominatim search qualified with the province and bounded to its
- *    bounding box) — two provinces may contain cities with the same name,
- *    and the static name-only table below is therefore only an offline
- *    fallback, never the primary source when a province is selected.
- *  - A **district** is resolved against city + province the same way; a
- *    neighbourhood name like "گلستان" exists in many cities, so the
- *    qualified, bounded query is what makes it resolve the exact one.
- *  - A **province** uses the static centre table (already exact); the
- *    geocoder only covers provinces that are not in the table yet.
+ *  - A **province** uses the static centre table (already exact, no internet);
+ *    the geocoder only covers provinces not in the table.
+ *  - A **city** / **district** structured selection (`options.variants = true`)
+ *    tries an ordered ladder of queries (most specific first) so a repeated
+ *    name resolves to its selected parents, and applies the acceptance rule
+ *    above. On failure it returns null — the caller must NOT move the camera.
+ *  - Free-text search (the picker's search box, `options.variants` omitted)
+ *    keeps the single qualified query with the bounded→unbounded fallback and
+ *    no acceptance rule (today's behaviour, unchanged).
  *
  * Returns null when nothing can be resolved.
  */
 export async function resolvePlaceCoordinates(
   name: string,
   kind: "province" | "city" | "district",
-  context?: { provinceName?: string; cityName?: string }
+  context?: { provinceName?: string; cityName?: string },
+  options?: { variants?: boolean }
 ): Promise<LatLng | null> {
   const clean = (name || "").trim();
   if (!clean) return null;
 
   const province = context?.provinceName?.trim() || undefined;
+  const city = context?.cityName?.trim() || undefined;
   const viewbox = provinceViewbox(province);
 
   if (kind === "province") {
     const c = IRAN_PROVINCE_CENTERS[clean];
     if (c) return c;
-    return nominatimSearch(clean, null);
+    const hit = await nominatimSearch(clean, null, false);
+    return hit ? [hit.lat, hit.lon] : null;
   }
 
-  // Qualified query: most specific name first, then parent city and
-  // province, so a repeated name ranks its selected location first.
-  const parts = [clean];
-  if (kind === "district") {
-    const city = context?.cityName?.trim();
-    if (city) parts.push(city);
+  if (!options?.variants) {
+    // Free-text search: today's single qualified query, bounded → unbounded,
+    // top hit accepted as-is.
+    const parts = [clean];
+    if (kind === "district" && city) parts.push(city);
+    if (province) parts.push(province);
+    const q = parts.join(", ");
+    const hit = viewbox
+      ? (await nominatimSearch(q, viewbox, true)) ??
+        (await nominatimSearch(q, viewbox, false))
+      : await nominatimSearch(q, null, false);
+    return hit ? [hit.lat, hit.lon] : null;
   }
-  if (province) parts.push(province);
 
-  const resolved = await nominatimSearch(parts.join(", "), viewbox);
-  if (resolved) return resolved;
-
-  // Offline / not-found fallback: the static city table (name only — best
-  // effort when the geocoder is unreachable).
-  if (kind === "city") {
-    const c = IRAN_CITY_CENTERS[clean];
-    if (c) return c;
+  // Structured selection: ordered variant ladder + acceptance rule.
+  for (const variant of buildQueryVariants(clean, kind, context)) {
+    const fullyQualified = variantIsFullyQualified(variant, kind, context);
+    const hit = await nominatimSearch(variant, viewbox, !fullyQualified);
+    if (hit && acceptsResult(hit, province, fullyQualified)) {
+      return [hit.lat, hit.lon];
+    }
   }
   return null;
 }
