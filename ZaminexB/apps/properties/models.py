@@ -16,26 +16,26 @@ class ActivePropertyManager(models.Manager):
 
 class Property(models.Model):
     class Status(models.TextChoices):
-        AVAILABLE = "AVAILABLE", "Available"
-        RESERVED = "RESERVED", "Reserved"
-        SOLD = "SOLD", "Sold"
-        INACTIVE = "INACTIVE", "Archived"
+        AVAILABLE = "AVAILABLE", "آماده واگذاری"
+        RESERVED = "RESERVED", "رزرو شده"
+        SOLD = "SOLD", "فروخته/واگذارشده"
+        INACTIVE = "INACTIVE", "بایگانی‌شده"
 
     class DealType(models.TextChoices):
-        SALE = "SALE", "Sale"
-        RENT = "RENT", "Rent"
+        SALE = "SALE", "فروش"
+        RENT = "RENT", "اجاره"
 
     class PropertyType(models.TextChoices):
-        APARTMENT = "APARTMENT", "Apartment"
-        VILLA = "VILLA", "Villa"
-        TOWNHOUSE = "TOWNHOUSE", "Townhouse"
-        STUDIO = "STUDIO", "Studio"
-        PENTHOUSE = "PENTHOUSE", "Penthouse"
-        COMMERCIAL = "COMMERCIAL", "Commercial"
-        OFFICE = "OFFICE", "Office"
-        SHOP = "SHOP", "Shop"
-        LAND = "LAND", "Land"
-        OTHER = "OTHER", "Other"
+        APARTMENT = "APARTMENT", "آپارتمان"
+        VILLA = "VILLA", "ویلا"
+        TOWNHOUSE = "TOWNHOUSE", "خانه ویلایی"
+        STUDIO = "STUDIO", "استودیو"
+        PENTHOUSE = "PENTHOUSE", "پنت‌هاوس"
+        COMMERCIAL = "COMMERCIAL", "تجاری/اداری"
+        OFFICE = "OFFICE", "دفتر کار"
+        SHOP = "SHOP", "مغازه"
+        LAND = "LAND", "زمین"
+        OTHER = "OTHER", "سایر"
 
     title = models.CharField(max_length=255, verbose_name="عنوان ملک")
     internal_code = models.CharField(max_length=50, unique=True, verbose_name="کد داخلی")

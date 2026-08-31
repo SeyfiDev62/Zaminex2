@@ -19,13 +19,8 @@ stage report.
 - **Stage 13 follow-up:** appraisal download on a non-owned property is 403 by
   design (sensitive). Future: hide the appraisal section for non-owners rather
   than show a 403 toast.
-- **Stage 14 follow-up:** the model ``*_display`` choice labels are still
-  English (``Property.Status.AVAILABLE = ("AVAILABLE", "Available")``, and so
-  on for Listing/Task/FollowUp). The activity feed now maps them to Persian via
-  ``apps/activity/labels.py``, but the raw labels remain a pre-existing UI
-  contract the frontend also maps around. Promoting the labels themselves to
-  Persian is a UI-wide change (forms, admin, serializers) — left for a future
-  stage; do not do it opportunistically here.
+- **Stage 14 follow-up (RESOLVED — Batch 2 Stage 1):** the model ``*_display``
+  choice labels were English; promoted to Persian (see Batch 2 Stage 1 below).
 
 ## Stage 16 — final regression sweep + owner's report (verification & docs only)
 
@@ -38,6 +33,49 @@ No feature changes. Sweep evidence:
   after the rebuild — byte-identical to the committed bundle.
 - **Working tree clean** after clearing 58 diagnostic media files regenerated
   by the test runs (Stage 13's 871-file precedent).
+
+## Batch 2 — Stage 1: promote model choice labels to Persian (Option B)
+
+Carries the **Stage 14 follow-up** (English ``*_display`` choice labels leak
+across UI/admin/API). Decision: **Option B** — promote the model choice labels
+themselves to Persian, single source of truth. Consequences accepted and
+verified: Django admin renders Persian for free; every ``get_*_display()``
+consumer (admin, ``reports/services.py``, ``tasks/serializers.py``,
+``tasks/history.py``, ``reports/pdf.py``) now emits Persian automatically; the
+FE maps in ``shared/lib/utils.ts`` key on raw **codes** (unchanged) so zero FE
+source change is required.
+
+### Inventory (pre-edit evidence)
+
+- **6 models edited** (English → Persian labels): `accounts.UserRole`
+  (Admin/Agent → مدیر/مشاور), `properties.Status` (Available/Reserved/Sold/Archived),
+  `properties.DealType`, `properties.PropertyType` (10), `listings.Status`,
+  `listings.PublishChannel`, `listings.Priority`, `tasks.Status`, `tasks.Priority`,
+  `tasks.TaskType` (8), `followups.FollowUpType`, `followups.FollowUpStatus`.
+- **Already Persian (no change):** `activity.ActionType/TargetType`, all `basics`
+  vocabularies, `notifications.NotificationType`, all `tickets` vocabularies.
+- **Auto-promoted consumers:** `reports/services.py` (8 `get_*_display()` sites),
+  `tasks/serializers.py` (statusLabel/priorityLabel/typeLabel), `tasks/history.py`,
+  `reports/pdf.py`, Django admin `list_display`.
+- **FE:** no hardcoded English label strings; all display via `toPersian*` maps
+  keyed on codes → zero FE edits.
+
+### Changes
+
+- 6 model files: choice labels → Persian.
+- `apps/activity/labels.py`: added frozen `_LEGACY_EN` map (old English label →
+  Persian) so **legacy activity rows** written before the promotion still
+  translate; `_choice_tokens` now takes `legacy_en`. Module docstring updated.
+- 5 new migrations (Django 5.2 tracks `choices` in migration state; all pure
+  `AlterField`, no data change): accounts 0009, followups 0004, listings 0007,
+  properties 0015, tasks 0004.
+
+### Verification
+
+- **Full Django suite: 697 tests, 0 failures** (unchanged — tests key on raw codes).
+- **vitest: 24/24** (no FE change).
+- `apps.activity`: 26/0 in isolation.
+- No FE file touched → build not re-run (bundle unchanged).
 - **Per-bug regression:** re-ran the 8 committed test modules carrying the
   bugs' assertions (`analytics.test_ai_service`, `basics.test_attribute_admin`,
   `basics.test_attribute_category`, `basics.test_api`,

@@ -5,15 +5,15 @@ from django.utils import timezone
 
 
 class FollowUpType(models.TextChoices):
-    CALL = "Call", "Call"
-    MEETING = "Meeting", "Meeting"
-    EMAIL = "Email", "Email"
-    SITE_VISIT = "Site Visit", "Site Visit"
+    CALL = "Call", "تماس تلفنی"
+    MEETING = "Meeting", "جلسه حضوری"
+    EMAIL = "Email", "ارسال پیام/ایمیل"
+    SITE_VISIT = "Site Visit", "بازدید میدانی ملک"
 
 
 class FollowUpStatus(models.TextChoices):
-    SCHEDULED = "scheduled", "Scheduled"
-    COMPLETED = "completed", "Completed"
+    SCHEDULED = "scheduled", "برنامه‌ریزی‌شده"
+    COMPLETED = "completed", "تکمیل‌شده"
 
 
 class FollowUpQuerySet(models.QuerySet):
