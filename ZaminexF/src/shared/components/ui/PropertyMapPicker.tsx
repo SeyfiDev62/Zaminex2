@@ -17,17 +17,11 @@ import {
   PropertyMarkerPopupBody,
 } from "./PropertyMarkerPopup";
 
-// Leaflet's default marker icons don't resolve from bundlers; build one inline.
-const centerMarkerIcon = L.divIcon({
-  className: "zaminex-map-pin",
-  // The fixed selection marker: always rendered at the map centre, so it
-  // stays in the middle of the frame while the user drags the map around it.
-  html: `<div style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:9999px;background:rgba(255,255,255,0.96);border:3px solid #0BB68A;box-shadow:0 4px 10px rgba(0,0,0,0.28);">
-           <div style="width:9px;height:9px;border-radius:9999px;background:#0BB68A;"></div>
-         </div>`,
-  iconSize: [30, 30],
-  iconAnchor: [15, 15],
-});
+// The fixed selection marker: the SAME teardrop pin as the located-property
+// markers (identical template/size/anchor via makePinIcon) in the fixed
+// primary green, so its tip lands exactly on the map centre and stays there
+// while the user drags the map around it.
+const centerMarkerIcon = makePinIcon("#0BB68A");
 
 function roundCoord(n: number): number {
   // Backend DecimalField(max_digits=9, decimal_places=6) rejects raw Leaflet
@@ -362,11 +356,11 @@ function PropertyMapPicker({
         </MapContainer>
 
         {/* Live marker coordinates — update in real time while the map moves. */}
-        <div className="pointer-events-none absolute bottom-2 left-2 bg-white/95 backdrop-blur rounded-lg px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm font-mono">
+        <div className="pointer-events-none absolute bottom-2 left-2 z-[1000] bg-white/95 backdrop-blur rounded-lg px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm font-mono">
           {center[0].toFixed(6)}, {center[1].toFixed(6)}
         </div>
         {value && (
-          <div className="pointer-events-none absolute top-2 right-2 bg-white/95 rounded-lg px-2 py-1 text-[11px] text-emerald-700 font-semibold flex items-center gap-1 shadow-sm">
+          <div className="pointer-events-none absolute top-2 right-12 z-[1000] bg-white/95 rounded-lg px-2 py-1 text-[11px] text-emerald-700 font-semibold flex items-center gap-1 shadow-sm">
             <MapPin size={11} />موقعیت ثبت شد
           </div>
         )}
@@ -389,7 +383,7 @@ function PropertyMapPicker({
         )}
       </div>
 
-      <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+      <div className="flex flex-nowrap items-center gap-3 overflow-x-auto whitespace-nowrap text-[11px] text-muted-foreground">
         <span>کشیدن نقشه برای جابه‌جایی مارکر</span>
         <span>·</span>
         <span>دکمه «تایید موقعیت ملک» برای ثبت نقطه</span>

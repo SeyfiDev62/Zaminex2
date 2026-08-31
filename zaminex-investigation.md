@@ -3,6 +3,67 @@
 Per-stage root-cause evidence. Essential findings are also reproduced in each
 stage report.
 
+## Environment rebuild (canonical — run verbatim after any sandbox wipe)
+
+A wipe removes `.venv/`, `ZaminexF/node_modules/`, `/home/user/pg/` (PostgreSQL)
+and the DB data dir; the repo stays but the local branch may reset to `fc63dbd`.
+Recovery order:
+
+1. **Git state** — `git fetch origin arena/01a05300-zaminex2` then
+   `git reset --hard FETCH_HEAD` (history is linear; the remote carries every
+   pushed stage commit). Preserve any uncommitted work to `/tmp/` first.
+2. **Backend venv** — `python3 -m venv .venv` +
+   `.venv/bin/pip install -r ZaminexB/requirements.txt`.
+3. **PostgreSQL** — `pip download pgserver==0.1.4 --no-deps -d /home/user/pgwheel`;
+   `unzip` the wheel, move `pgserver/pginstall` to `/home/user/pg/pginstall`;
+   create the missing libpq symlink `ln -s libpq.so.5.16 libpq-084d956f.so.5.16`
+   in `pginstall/lib`; fetch `REL_16_2` source and `make USE_PGXS=1
+   PG_CONFIG=/home/user/pg/pginstall/bin/pg_config install` in
+   `contrib/pg_trgm`; `initdb -D /home/user/pg/data --locale=C.UTF-8
+   --encoding=UTF8 -U zaminex`; `pg_ctl -D /home/user/pg/data -o "-p 5432" start`;
+   `CREATE DATABASE zaminex` + `ALTER USER zaminex WITH PASSWORD 'zaminex'`;
+   restore `zaminex_backup.sql` after stripping the `\restrict`/`\unrestrict`
+   lines; `manage.py migrate` + `manage.py check`.
+4. **Frontend** — `npm install` in `ZaminexF`.
+5. **Baseline gate** — `manage.py test apps` must be **655/0** before any code
+   edit. `export DATABASE_URL=postgres://zaminex:zaminex@127.0.0.1:5432/zaminex`
+   and `export LD_LIBRARY_PATH=/home/user/pg/pginstall/lib` first.
+
+## Stage 6 — map picker overlays / centre marker / helper line
+
+### Reproduce / locate
+
+The two overlay chips (lat/lon readout bottom-left, «موقعیت ثبت شد» badge
+top-right) are `absolute` with `pointer-events-none` but **no z-index**, so
+Leaflet's panes (z 200–700) and controls (z 1000) paint over them — they were
+invisible. The confirm button already worked because it carries `z-[1000]`.
+
+### Fix (minimal diff, PropertyMapPicker.tsx only)
+
+- **Chips** — added `z-[1000]` to both (kept `pointer-events-none`).
+- **Badge/zoom overlap** — Leaflet's zoom control defaults to `topright`, which
+  the badge occupied. Leaflet's `zoomControl` Map option is boolean-only (no
+  position object — verified in `leaflet-src.js`), so repositioning would need a
+  `<ZoomControl position>` child. Chose the lighter, convention-preserving fix:
+  offset the badge left (`right-2` → `right-12`) so it clears the ~30px control,
+  keeping zoom at its default `topright` like every other map.
+- **Centre marker** — replaced the inline circle `divIcon` with
+  `makePinIcon("#0BB68A")` — the same teardrop pin template/size/anchor as the
+  located-property markers (`iconSize [34,40]`, `iconAnchor [17,38]`), fixed
+  green, so the pin tip lands on the map centre. No change to `position={center}`
+  tracking or `CenterTracker`.
+- **Helper line** — `flex flex-wrap gap-3` → `flex flex-nowrap items-center
+  gap-3 overflow-x-auto whitespace-nowrap`; the three hints + separators are
+  byte-identical, no wrap at any width, horizontal scroll at 320px.
+
+### Verification
+
+- Interaction logic (search, province/city/district resolution, confirm flow,
+  value/centre sync, all `flyTo`) byte-identical — diff shows presentation only.
+- Both create + edit forms share the single `PropertyMapPicker` (grep: two
+  imports, one definition, no fork).
+- Full suite 655 tests, 0 failures. `npm run build` OK.
+
 ## Stage 5 — consultant legend under admin map (scalability)
 
 ### Reproduce / locate
