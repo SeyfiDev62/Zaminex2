@@ -148,6 +148,12 @@ class Attribute(ReferenceDataModel):
         PROPERTY = "property", "ملک"
         LISTING = "listing", "آگهی"
 
+    class Category(models.TextChoices):
+        """Essential ⇔ core or actively bound; the rest are non-essential."""
+
+        ESSENTIAL = "essential", "ویژگی ضروری"
+        NON_ESSENTIAL = "non_essential", "ویژگی غیر ضروری"
+
     data_type = models.CharField(
         max_length=20,
         choices=DataType.choices,
@@ -178,6 +184,13 @@ class Attribute(ReferenceDataModel):
         blank=True,
         verbose_name="واحد",
         help_text="مثلاً متر مربع، تومان، عدد.",
+    )
+    category = models.CharField(
+        max_length=20,
+        choices=Category.choices,
+        default=Category.NON_ESSENTIAL,
+        verbose_name="دسته‌بندی ویژگی",
+        help_text="ضروری ⇔ فیلد ثابت یا دارای حداقل یک اتصال فعال؛ در غیر این صورت غیر ضروری.",
     )
     is_facility = models.BooleanField(
         default=False,

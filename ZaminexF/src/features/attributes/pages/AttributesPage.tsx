@@ -28,7 +28,7 @@ import { AttributeCombobox } from "../../../shared/components/ui/AttributeCombob
 //  be changed and they cannot be deleted, so those controls are hidden.
 // =============================================================================
 
-type TabKey = "attributes" | "bindings";
+type TabKey = "attributes" | "bindings" | "categories";
 
 type Option = { id: number; value: string; displayName: string; isActive: boolean };
 
@@ -41,6 +41,7 @@ type Attribute = {
   filterType: string;
   entity: "property" | "listing";
   unit: string;
+  category: "essential" | "non_essential";
   isFacility: boolean;
   isCore: boolean;
   coreField: string;
@@ -246,6 +247,31 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   };
 
+  const handleMoveCategory = async (row: Attribute, target: "essential" | "non_essential") => {
+    // Optimistic: flip the group immediately so the row jumps without waiting
+    // for the round trip; revert on failure so a rejected move never leaves
+    // the row in the wrong group.
+    setAttributes((prev) => prev.map((a) => (a.id === row.id ? { ...a, category: target } : a)));
+    try {
+      const res = await apiFetch(
+        `/basics/api/attributes/${row.id}/`,
+        { method: "PATCH", body: JSON.stringify({ category: target }) },
+        csrfToken
+      );
+      if (res.ok) {
+        toast({ type: "success", message: target === "essential" ? "به ویژگی‌های ضروری منتقل شد." : "به ویژگی‌های غیر ضروری منتقل شد." });
+        await fetchAttributes();
+      } else {
+        const data = await res.json().catch(() => null);
+        setAttributes((prev) => prev.map((a) => (a.id === row.id ? { ...a, category: row.category } : a)));
+        toast({ type: "error", message: data?.category?.[0] || data?.detail || "خطا در تغییر دسته‌بندی" });
+      }
+    } catch {
+      setAttributes((prev) => prev.map((a) => (a.id === row.id ? { ...a, category: row.category } : a)));
+      toast({ type: "error", message: "خطا در ارتباط با سرور" });
+    }
+  };
+
   const handleDelete = (row: Attribute) => {
     setPendingDelete(row);
   };
@@ -413,6 +439,13 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     (a) => a.isActive && a.entity === bindKind && !boundIds.has(a.id)
   );
 
+  // The «دسته‌بندی ویژگی‌ها» tab renders straight from the shared `attributes`
+  // state (fetched once on mount) — no second fetch. Anything without an
+  // explicit `essential` value falls into the non-essential group, matching the
+  // model default.
+  const essentialAttributes = attributes.filter((a) => a.category === "essential");
+  const nonEssentialAttributes = attributes.filter((a) => a.category !== "essential");
+
   const currentTypes = bindKind === "property" ? propertyTypes : dealTypes;
 
   const subtitleFor = (a: Attribute) => {
@@ -430,7 +463,7 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
 
       {/* Tabs */}
       <div className="flex items-center gap-1 p-1 bg-secondary rounded-xl w-fit">
-        {([["attributes", "ویژگی‌ها"], ["bindings", "اتصال به انواع"]] as [TabKey, string][]).map(([key, label]) => (
+        {([["attributes", "ویژگی‌ها"], ["bindings", "اتصال به انواع"], ["categories", "دسته‌بندی ویژگی‌ها"]] as [TabKey, string][]).map(([key, label]) => (
           <button
             key={key}
             type="button"
@@ -734,6 +767,60 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
             )}
           </Card>
         </>
+      )}
+
+      {tab === "categories" && (
+        <div className="space-y-5">
+          {[
+            {
+              key: "essential",
+              title: "ویژگی‌های ضروری",
+              items: essentialAttributes,
+              target: "non_essential" as const,
+              actionLabel: "انتقال به ویژگی‌های غیر ضروری",
+            },
+            {
+              key: "non_essential",
+              title: "ویژگی‌های غیر ضروری",
+              items: nonEssentialAttributes,
+              target: "essential" as const,
+              actionLabel: "انتقال به ویژگی‌های ضروری",
+            },
+          ].map((group) => (
+            <Card key={group.key} className="overflow-hidden">
+              <div className="px-5 py-3.5 border-b border-border bg-secondary/30">
+                <h3 className="text-sm font-semibold">
+                  {group.title} ({group.items.length.toLocaleString("fa-IR")})
+                </h3>
+              </div>
+              {group.items.length === 0 ? (
+                <p className="px-5 py-6 text-center text-xs text-muted-foreground">
+                  هیچ ویژگی‌ای در این دسته نیست.
+                </p>
+              ) : (
+                <div className="divide-y divide-border">
+                  {group.items.map((a) => (
+                    <div key={a.id} className="flex items-center justify-between gap-3 px-5 py-3.5 hover:bg-secondary/20 transition-colors">
+                      <div className="flex items-center gap-3 min-w-0 flex-1">
+                        <div className={cx("w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0", a.isActive ? "bg-emerald-100 text-emerald-600" : "bg-gray-100 text-gray-400")}>
+                          {a.isFacility ? <Zap size={14} /> : <SlidersHorizontal size={14} />}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className={cx("text-sm font-semibold truncate", !a.isActive && "text-gray-400")}>{a.displayName}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">{subtitleFor(a)}</p>
+                        </div>
+                      </div>
+                      <Btn variant="ghost" size="xs" onClick={() => handleMoveCategory(a, group.target)} className="flex-shrink-0">
+                        <ArrowUpRight size={12} />
+                        {group.actionLabel}
+                      </Btn>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+          ))}
+        </div>
       )}
 
       <ConfirmModal

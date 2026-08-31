@@ -214,6 +214,70 @@ a recipient-removal `X`). The standard step-back was implemented directly here.
 - Full Django suite: **671 tests, 0 failures** (no backend change).
 - Frontend: `npm run build` OK (new bundle `main-DrLSEzf0.js`); vitest 24/24.
 
+## Stage 12 — attribute «دسته‌بندی ویژگی‌ها» (essential / non-essential)
+
+### Classification rule (single source of truth)
+
+`apps/basics/categorization.classify_attribute(is_core, active_binding_count)`:
+
+    essential     ⇔  is_core  OR  active_binding_count ≥ 1
+    non_essential ⇔  otherwise
+
+`active_binding_count` = active `PropertyTypeAttribute` + `DealTypeAttribute`
+rows (`is_active=True`). The `is_core` clause keeps core attributes (متراژ /
+قیمت / …) essential even when they have no binding row — a binding-only rule
+would misclassify them.
+
+### Migration (two-step, reversible)
+
+`0003_attribute_category.py`:
+1. `AddField category` — `CharField(max_length=20,
+   choices=Category.choices, default=NON_ESSENTIAL)`.
+2. `RunPython` importing the pure function; iterates every row (the historical
+   model's default manager is a plain Manager, so soft-deleted rows are covered
+   too) and `save(update_fields=["category"])`. Reverse = `update(category=
+   "non_essential")` (safe default; classification re-derivable).
+
+### Dev-DB result (populated, after migrate)
+
+Live attributes: **27** → **26 essential / 1 non-essential**.
+
+- Essential sample: متراژ / تعداد اتاق / طبقه / سال ساخت (core) and
+  تعداد کل طبقات / واحد در طبقه / نوع سند / پارکینگ … (actively bound).
+- Non-essential (only one): آنتن مرکزی (unbound, non-core).
+- Soft-deleted rows: 0.
+
+### API
+
+`AttributeSerializer.fields` gained `"category"` — one-word field kept as
+`category` on the wire (consistent with `entity` / `unit`, which are also
+exposed un-camelCased). Writable via the existing PATCH, present in the list;
+new attributes default to `non_essential` (model default). Additive only:
+`AttributeMiniSerializer` / `FormFieldSerializer` (form schema) and the
+catalogue are untouched — the full suite still passes, so no list consumer
+broke on the extra field.
+
+### Frontend
+
+Third tab «دسته‌بندی ویژگی‌ها» in `AttributesPage.tsx`:
+- renders from the shared `attributes` state (no new fetch) — two groups
+  «ویژگی‌های ضروری (n)» / «ویژگی‌های غیر ضروری (n)» with fa-IR counts, each
+  row = name + a move action (`handleMoveCategory`) that PATCHes `{category}`,
+  updates optimistically, reverts + refetches + toasts the server message on
+  4xx. Empty group → muted «هیچ ویژگی‌ای در این دسته نیست.» line.
+- The other two tabs' content blocks are byte-for-byte unchanged (the tab map
+  array only gained a third entry).
+
+### Verification
+
+- 10 new tests in `apps/basics/tests/test_attribute_category.py`
+  (`ClassifyAttributeTests` — pure rule; `AttributeCategoryApiTests` — default,
+  list, PATCH both directions, invalid category → 400).
+- Full Django suite: **681 tests, 0 failures** (was 671; +10). The fresh-DB run
+  covers migration-apply.
+- `npm run build` OK (bundle `main-DiLqo31d.js`); vitest 24/24 (no new helper
+  warranted a vitest test — the grouping is an inline `filter`).
+
 ## Stage 8 — attribute management: real delete, instant add, consistent lists
 
 ### Diagnostic matrix (evidence-first, dev DB via `django.test.Client`)
