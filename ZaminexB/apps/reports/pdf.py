@@ -7,10 +7,12 @@ records, so the document always matches what the screen shows:
     1. header  — company name, title, generation time, exported by
     2. اطلاعات ملک — the property's stored facts
     3. شاخص‌های کلیدی — the report KPIs
-    4. آگهی‌ها — every listing of the property with its commercial details
-    5. پیگیری‌ها — every active follow-up
-    6. نمودارها — a few compact charts from the report data
-    7. سابقه و لاگ‌ها — every activity-log entry that belongs to this
+    4. توصیف هوش مصنوعی — the AI description, omitted when AI is unavailable
+    5. آگهی‌ها — every listing of the property with its commercial details
+    6. وظایف — every task attached to the property
+    7. پیگیری‌ها — every active follow-up
+    8. نمودارها — a few compact charts from the report data
+    9. سابقه و لاگ‌ها — every activity-log entry that belongs to this
        property (its own events plus the events of its listings, follow-ups
        and tasks)
 
@@ -50,6 +52,7 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from rest_framework.exceptions import APIException
 
 FONT_NAME = "IRANRounded"
 _font_registered = False
@@ -163,6 +166,27 @@ TASK_TYPE_FA = {
     "Contract": "قرارداد",
     "Inspection": "بازرسی",
 }
+TASK_STATUS_FA = {
+    "PENDING": "در انتظار انجام",
+    "IN_PROGRESS": "در حال انجام",
+    "COMPLETED": "تکمیل‌شده",
+    "CANCELLED": "لغوشده",
+}
+
+
+class _FontUnavailable(APIException):
+    """The report font is missing or corrupt — refuse to build, never blank.
+
+    A PDF whose only font failed to load would render as an empty document
+    (or worse, crash mid-render). That is worse than no PDF at all, so the
+    failure is surfaced as a clean 500 with an actionable Persian message.
+    """
+
+    status_code = 500
+    default_detail = (
+        "فایل فونت فارسی گزارش در دسترس نیست یا خراب است؛ امکان تولید PDF وجود ندارد."
+    )
+    default_code = "report_font_unavailable"
 
 
 def _register_font() -> None:
@@ -170,7 +194,23 @@ def _register_font() -> None:
     if _font_registered:
         return
     path = Path(settings.BASE_DIR) / "static" / "fonts" / "ttf" / "IRAN Rounded.ttf"
-    pdfmetrics.registerFont(TTFont(FONT_NAME, str(path)))
+    try:
+        # Cheap structural pre-check: a font corrupted on checkout (git text
+        # handling CRLF-converts the bytes, a bad clone truncates the file)
+        # is caught here before reportlab's parser chokes. The TTF/OTF/TTC
+        # magic number is the same across all variants.
+        with path.open("rb") as fh:
+            header = fh.read(4)
+        if header not in (b"\x00\x01\x00\x00", b"true", b"OTTO", b"ttcf"):
+            raise _FontUnavailable()
+        pdfmetrics.registerFont(TTFont(FONT_NAME, str(path)))
+    except _FontUnavailable:
+        raise
+    except Exception as exc:
+        # Deeper corruption (valid header, broken table directory) surfaces
+        # here as a reportlab TTFError; any I/O failure too. Either way the
+        # export must fail loudly in Persian — never emit an empty PDF.
+        raise _FontUnavailable() from exc
     _font_registered = True
 
 
@@ -352,13 +392,53 @@ def _kpi_section(story, styles, kpis: dict) -> None:
     _label_value_table(story, styles, rows)
 
 
+def _ai_section(story, styles, prop) -> None:
+    """The AI description (positives / negatives / summary), or nothing.
+
+    Reuses the cached AI pipeline only (``_property_ai_data`` +
+    ``get_cached_description``). Any problem — AI unconfigured, provider
+    failure, timeout — omits the section; the export must never fail or hang
+    because of AI.
+    """
+    try:
+        from apps.analytics.views import _property_ai_data
+        from apps.analytics.ai_service import get_cached_description
+
+        data = _property_ai_data(prop)
+        description = get_cached_description(
+            data, entity="property", entity_id=prop.pk
+        )
+    except Exception:
+        return
+
+    positives = [str(x) for x in (description.get("positives") or []) if x]
+    negatives = [str(x) for x in (description.get("negatives") or []) if x]
+    summary = (description.get("summary") or "").strip()
+    if not summary and not positives and not negatives:
+        return
+
+    _section_header(story, styles, "۳. توصیف هوش مصنوعی")
+    if summary:
+        story.append(Paragraph(t(summary), styles["cell"]))
+        story.append(Spacer(1, 2 * mm))
+    if positives:
+        story.append(Paragraph(t("نکات مثبت:"), styles["cellLabel"]))
+        for item in positives:
+            story.append(Paragraph(t(f"• {item}"), styles["cell"]))
+    if negatives:
+        story.append(Spacer(1, 1.5 * mm))
+        story.append(Paragraph(t("نکات منفی:"), styles["cellLabel"]))
+        for item in negatives:
+            story.append(Paragraph(t(f"• {item}"), styles["cell"]))
+
+
 def _listings_section(story, styles, prop) -> None:
-    _section_header(story, styles, "۳. آگهی‌های ملک")
+    _section_header(story, styles, "۴. آگهی‌های ملک")
     listings = list(prop.listings.all())
     if not listings:
         story.append(Paragraph(t("برای این ملک آگهی‌ای ثبت نشده است."), styles["empty"]))
         return
-    header = [t(h) for h in ["پایان", "شروع", "قیمت (تومان)", "وضعیت", "کانال", "عنوان"]]
+    header = [t(h) for h in ["تاریخ", "وضعیت", "قیمت (تومان)", "کانال", "عنوان"]]
     data = [header]
     for l in sorted(listings, key=lambda x: (x.start_date or x.created_at or datetime.datetime.min), reverse=True):
         if l.deal_type_id and l.deal_type.name == "rent" and l.deposit is not None:
@@ -369,45 +449,67 @@ def _listings_section(story, styles, prop) -> None:
             price = "—"
         data.append(
             [
-                Paragraph(t(_jalali(l.end_date)), styles["cellCenter"]),
-                Paragraph(t(_jalali(l.start_date)), styles["cellCenter"]),
-                Paragraph(t(price), styles["cellCenter"]),
+                Paragraph(t(_jalali(l.start_date or l.created_at)), styles["cellCenter"]),
                 Paragraph(t(LISTING_STATUS_FA.get(l.status, l.status)), styles["cellCenter"]),
+                Paragraph(t(price), styles["cellCenter"]),
                 Paragraph(t(CHANNEL_FA.get(l.publish_channel, l.publish_channel)), styles["cellCenter"]),
                 Paragraph(t(l.title or "—"), styles["cell"]),
             ]
         )
-    table = Table(data, colWidths=[22 * mm, 22 * mm, 40 * mm, 26 * mm, 28 * mm, 40 * mm], hAlign="RIGHT")
+    table = Table(data, colWidths=[26 * mm, 26 * mm, 44 * mm, 30 * mm, 52 * mm], hAlign="RIGHT")
+    table.setStyle(_table_style(len(data)))
+    story.append(table)
+
+
+def _tasks_section(story, styles, prop) -> None:
+    _section_header(story, styles, "۵. وظایف ملک")
+    tasks = list(prop.tasks.all())
+    if not tasks:
+        story.append(Paragraph(t("برای این ملک وظیفه‌ای ثبت نشده است."), styles["empty"]))
+        return
+    header = [t(h) for h in ["تاریخ سررسید", "وضعیت", "عنوان"]]
+    data = [header]
+    for task in sorted(tasks, key=lambda x: x.due_date or datetime.date.min, reverse=True):
+        due = (
+            datetime.datetime.combine(task.due_date, datetime.time())
+            if task.due_date
+            else None
+        )
+        data.append(
+            [
+                Paragraph(t(_jalali(due)), styles["cellCenter"]),
+                Paragraph(t(TASK_STATUS_FA.get(task.status, task.status)), styles["cellCenter"]),
+                Paragraph(t(task.title or "—"), styles["cell"]),
+            ]
+        )
+    table = Table(data, colWidths=[34 * mm, 30 * mm, 114 * mm], hAlign="RIGHT")
     table.setStyle(_table_style(len(data)))
     story.append(table)
 
 
 def _followups_section(story, styles, prop) -> None:
-    _section_header(story, styles, "۴. پیگیری‌های ملک")
+    _section_header(story, styles, "۶. پیگیری‌های ملک")
     followups = [f for f in prop.followups.all() if not f.is_archived]
     if not followups:
         story.append(Paragraph(t("برای این ملک پیگیری‌ای ثبت نشده است."), styles["empty"]))
         return
-    header = [t(h) for h in ["احتمال", "زمان", "وضعیت", "نوع", "مخاطب", "عنوان"]]
+    header = [t(h) for h in ["تاریخ زمان‌بندی", "وضعیت", "عنوان"]]
     data = [header]
     for f in sorted(followups, key=lambda x: x.scheduled_at or datetime.datetime.min, reverse=True):
         data.append(
             [
-                Paragraph(t(f"{fa_number(f.probability)}٪") if f.probability is not None else t("—"), styles["cellCenter"]),
                 Paragraph(t(_jalali(f.scheduled_at)), styles["cellCenter"]),
                 Paragraph(t(FOLLOWUP_STATUS_FA.get(f.status, f.status)), styles["cellCenter"]),
-                Paragraph(t(FOLLOWUP_TYPE_FA.get(f.follow_up_type, f.get_follow_up_type_display())), styles["cellCenter"]),
-                Paragraph(t(f.contact_name or "—"), styles["cellCenter"]),
                 Paragraph(t(f.title or "—"), styles["cell"]),
             ]
         )
-    table = Table(data, colWidths=[18 * mm, 24 * mm, 26 * mm, 28 * mm, 36 * mm, 46 * mm], hAlign="RIGHT")
+    table = Table(data, colWidths=[34 * mm, 30 * mm, 114 * mm], hAlign="RIGHT")
     table.setStyle(_table_style(len(data)))
     story.append(table)
 
 
 def _charts_section(story, styles, charts: dict) -> None:
-    _section_header(story, styles, "۵. نمودارها")
+    _section_header(story, styles, "۷. نمودارها")
     # Chart labels come from the report as display strings; translate the ones
     # that are still English (task / follow-up / channel types) so the whole
     # document reads in Persian. Case-insensitive: the report mixes raw values
@@ -435,7 +537,7 @@ def _logs_section(story, styles, prop) -> None:
 
     from apps.activity.models import ActivityLog
 
-    _section_header(story, styles, "۶. سابقه و لاگ‌های ملک")
+    _section_header(story, styles, "۸. سابقه و لاگ‌های ملک")
     listing_ids = list(prop.listings.values_list("id", flat=True))
     followup_ids = list(prop.followups.values_list("id", flat=True))
     task_ids = list(prop.tasks.values_list("id", flat=True))
@@ -551,7 +653,9 @@ def build_property_pdf(prop, report: dict, exported_by) -> bytes:
 
     _property_info_section(story, styles, prop)
     _kpi_section(story, styles, report.get("kpis") or {})
+    _ai_section(story, styles, prop)
     _listings_section(story, styles, prop)
+    _tasks_section(story, styles, prop)
     _followups_section(story, styles, prop)
     _charts_section(story, styles, report.get("charts") or {})
     _logs_section(story, styles, prop)

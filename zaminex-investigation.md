@@ -3,6 +3,83 @@
 Per-stage root-cause evidence. Essential findings are also reproduced in each
 stage report.
 
+## Open items (carry-over)
+
+- **Stage 7 residual (user-side, non-blocking):** the map-picker variant ladder
+  was only verified against MOCK payloads (Nominatim is unreachable from this
+  sandbox). On a real-internet machine, pick a real Mazandaran district that
+  exists in OSM and confirm the camera lands on it, then record the result
+  here. One-liner for the report font (Stage 9) is kept below.
+
+## Stage 9 — property PDF: empty-failure hardening + AI section + log tables
+
+### Diagnosis (evidence-first)
+
+The committed font `ZaminexB/static/fonts/ttf/IRAN Rounded.ttf` is intact in this
+checkout (sha256 `1fd361ec…b39` matches), and `build_property_pdf` renders a valid
+multi-page PDF. The user's empty PDF is therefore most consistent with a
+corrupted/missing font **in their clone** — the repo has no `.gitattributes`, so
+Git's text handling can CRLF-convert or truncate binary files on checkout/clone.
+Simulated each failure mode against the current code (`_register_font` +
+`build_property_pdf`):
+
+| simulated corruption | current behaviour |
+|---|---|
+| missing file | `TTFError: Can't open file …` (uncaught → 500 HTML, no Persian detail) |
+| CRLF-converted (git text handling) | `TTFError: Corrupt TTF file … cannot read Table Directory` |
+| bit-flipped header | `TTFError: Not a recognized TrueType font` |
+| truncated 1 KB | `unpack requires a buffer of 2 bytes` |
+| empty / ASCII-text file | `TTFError: … is not a TTF file` |
+
+Every corruption raised an opaque `TTFError` mid-render — never a blank PDF, but
+an uncaught 500 with an English exception and no Persian detail, exactly the
+failure the user hit. The hardening converts all of these into one clean 500
+with a Persian message (see Fix).
+
+### Root cause
+
+`_register_font` called `pdfmetrics.registerFont(TTFont(...))` with no validation
+and no error handling, so a missing/corrupt font (the only font the PDF uses)
+raised a raw reportlab `TTFError` during `doc.build` — a 500 with an English
+message, no Persian detail, and no protection against a half-rendered/blank page.
+
+### Fix (minimal diff, `apps/reports/pdf.py` + `.gitattributes`)
+
+- **`.gitattributes`** (new, repo root): `*.ttf *.otf *.eot *.woff *.woff2 *.png
+  *.jpg *.jpeg *.gif *.ico *.pdf *.zip` marked `binary` so future clones can't
+  corrupt them via text handling.
+- **`_register_font`**: reads the first 4 bytes and rejects anything without a
+  TTF/OTF/TTC magic number; wraps the whole load in `try/except` and re-raises a
+  new `_FontUnavailable` (DRF `APIException`, `status_code=500`,
+  `code="report_font_unavailable"`, Persian detail «فایل فونت فارسی گزارش در
+  دسترس نیست یا خراب است؛ امکان تولید PDF وجود ندارد.»). Registration stays
+  lazy (still only on first export).
+- **AI section** (`_ai_section`): reuses `apps.analytics.views._property_ai_data`
+  + `apps.analytics.ai_service.get_cached_description`, wrapped so any `Exception`
+  (unconfigured, provider failure, timeout) omits the section. Renders
+  summary + positives + negatives with the existing `t()`/`fa_number`/styles.
+- **Tasks section** (`_tasks_section`, new): عنوان / وضعیت / تاریخ سررسید with
+  `TASK_STATUS_FA` labels. Listings table standardized to عنوان/کانال/قیمت/وضعیت/تاریخ,
+  follow-ups to عنوان/وضعیت/تاریخ زمان‌بندی (per the requested column standard).
+  Section order is now info → KPIs → AI → listings → tasks → follow-ups →
+  charts → logs (۱–۸).
+
+### Verification
+
+- Failure-mode capture above; after fix, missing and CRLF-corrupted fonts both
+  return 500 with `code="report_font_unavailable"` and the Persian detail (never
+  `%PDF-`).
+- New tests (8, in `apps/reports/tests.py`): `PropertyPdfContentTests`
+  (populated → 200, valid, ≥2 pages, >10 KB), `PropertyPdfEmptyHistoryTests`
+  (empty → 200 valid + all four entity-table placeholders asserted at story
+  level), `PropertyPdfAiSectionTests` (omitted when unconfigured, present when
+  mocked — size delta at build level, failure swallowed → still 200),
+  `PropertyPdfFontFailureTests` (missing/corrupt → 500 + Persian detail).
+- Full Django suite: **669 tests, 0 failures** (was 661; +8).
+- Font integrity one-liner for the user's machine:
+  `sha256sum "ZaminexB/static/fonts/ttf/IRAN Rounded.ttf"` — expect
+  `1fd361ec4e71e27bbcbc315dbad80aec783c02be027c22eaab969703485e0b39`.
+
 ## Stage 8 — attribute management: real delete, instant add, consistent lists
 
 ### Diagnostic matrix (evidence-first, dev DB via `django.test.Client`)
