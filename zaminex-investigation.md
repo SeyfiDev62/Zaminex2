@@ -3,6 +3,34 @@
 Per-stage root-cause evidence. Essential findings are also reproduced in each
 stage report.
 
+## Stage 5 — consultant legend under admin map (scalability)
+
+### Reproduce / locate
+
+The admin «نقشه توزیع املاک» legend rendered `consultantColorLegend` rows as a
+single `flex flex-wrap` row of chips with no bound or truncation: with 60+
+consultants the legend became an unbounded wall, and long consultant names
+pushed rows out of line.
+
+### Fix (minimal diff, AdminDashboard.tsx only)
+
+Chose **pattern (a) — bounded scrollable grid** (rejected (b) collapsible: it
+hides the majority of a *reference* legend behind a click by default, and its
+expanded state reintroduces an unbounded wall unless also bounded — i.e. (a)
+plus a toggle). Layout container `flex flex-wrap` → `grid grid-cols-2
+lg:grid-cols-3 gap-x-4 gap-y-1.5 max-h-36 overflow-y-auto rounded-lg border
+border-border p-2`. Row anatomy preserved (dot + name + fa-IR count); added
+`min-w-0` on the row, `min-w-0 truncate` + `title` on the name, `flex-shrink-0`
+on dot/count so names truncate instead of overflow. Data logic
+(`consultantColorLegend` useMemo) byte-identical; empty state untouched.
+
+### Verification
+
+- `git diff` shows only the legend container + row classes; `consultantColorLegend`
+  useMemo unchanged (diff evidence).
+- Full suite 655 tests, 0 failures. `npm run build` OK — bundle `main-DkmEwv2r.js`
+  + CSS `main-B0kUzkT2.css` (new Tailwind utilities from the added classes).
+
 ## Stage 4 — maps default to Mazandaran (Bug 3)
 
 ### Reproduce / locate
@@ -32,10 +60,13 @@ property has no coordinates, so it is a fly-to consumer, not a default-view one.
 
 ### Zoom math
 
+Mazandaran province bounds used for the midpoint: **lat 35.9–36.9, lng
+52.1–54.4** (latitude span ≈ 1.0°, longitude span ≈ 2.3°). Centre `[36.4, 53.2]`
+is the exact midpoint: (35.9+36.9)/2 = 36.4 and (52.1+54.4)/2 = 53.25 ≈ 53.2.
+
 Smallest surface is the picker panel (h-64 ≈ 256px). Visible latitude span at
-zoom z ≈ 360 / 2^z → z=8 ≈ 1.4°, z=9 ≈ 0.7°. Mazandaran latitude span ≈ 1.0°
-(bounds 35.9–36.9), so z=8 fits with margin; z=9 would crop it. Centre [36.4,
-53.2] is the exact midpoint of the bounds ((35.9+36.9)/2, (52.1+54.4)/2).
+zoom z ≈ 360 / 2^z → z=8 ≈ 1.4°, z=9 ≈ 0.7°. The province's ≈1.0° latitude span
+fits z=8 with margin; z=9 would crop it.
 
 ### Verification
 
