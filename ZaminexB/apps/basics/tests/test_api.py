@@ -387,16 +387,26 @@ class AttributeManagementTests(BasicsAPITestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_deleting_an_attribute_is_a_soft_delete(self):
-        response = self.client.delete(f"/basics/api/attributes/{self.doc.pk}/")
+        # An *unbound* non-core attribute: a bound one is refused (see
+        # ``test_attribute_admin.AttributeDeleteTests``), so this asserts the
+        # unbound soft-delete path.
+        attr = Attribute.objects.create(
+            name="unbound_del", display_name="حذف آزاد", data_type=Attribute.DataType.TEXT
+        )
+        response = self.client.delete(f"/basics/api/attributes/{attr.pk}/")
         self.assertEqual(response.status_code, 204)
-        self.assertFalse(Attribute.objects.filter(pk=self.doc.pk).exists())
-        self.assertTrue(Attribute.all_objects.filter(pk=self.doc.pk).exists())
+        self.assertFalse(Attribute.objects.filter(pk=attr.pk).exists())
+        self.assertTrue(Attribute.all_objects.filter(pk=attr.pk).exists())
 
     def test_a_soft_deleted_attribute_can_be_restored(self):
-        self.client.delete(f"/basics/api/attributes/{self.doc.pk}/")
-        response = self.client.post(f"/basics/api/attributes/{self.doc.pk}/restore/")
+        attr = Attribute.objects.create(
+            name="unbound_restore", display_name="بازیابی آزاد",
+            data_type=Attribute.DataType.TEXT,
+        )
+        self.client.delete(f"/basics/api/attributes/{attr.pk}/")
+        response = self.client.post(f"/basics/api/attributes/{attr.pk}/restore/")
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(Attribute.objects.filter(pk=self.doc.pk).exists())
+        self.assertTrue(Attribute.objects.filter(pk=attr.pk).exists())
 
     def test_attributes_can_be_filtered_by_entity(self):
         payload = self.client.get("/basics/api/attributes/?entity=listing").json()

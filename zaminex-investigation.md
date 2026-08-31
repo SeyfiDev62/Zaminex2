@@ -3,6 +3,71 @@
 Per-stage root-cause evidence. Essential findings are also reproduced in each
 stage report.
 
+## Stage 8 — attribute management: real delete, instant add, consistent lists
+
+### Diagnostic matrix (evidence-first, dev DB via `django.test.Client`)
+
+- **ADD** — POST `/basics/api/attributes/` → 201, body carries `id` (optimistic
+  insert works); follow-up GET `?all=1` → 200, new id present (lands at index 0).
+  Response headers `Cache-Control: no-store, no-cache, must-revalidate, max-age=0`
+  — the attributes CRUD list is **not** in the Phase-5 reference cache.
+- **DELETE core** → 400, body `["ویژگی‌های ثابت به ستون‌های پایگاه داده متصل هستند و قابل حذف نیستند."]`.
+- **DELETE bound (active binding)** → **204** pre-fix; row soft-deleted
+  (`deleted_at` set) while the active `PropertyTypeAttribute` row stayed behind →
+  **orphaned binding** (the bug).
+- **DELETE unbound non-core** → 204, row soft-deleted and hidden from `?all=1`.
+- `POST /basics/api/attributes/{id}/restore/` → 200 (Django admin exposes
+  `restore_selected` via `SoftDeleteAdmin`); the React UI has **no** restore path.
+
+### Root cause (delete) — `AttributeViewSet.perform_destroy`
+
+Only core attributes were refused. Bound attributes fell through to `instance.delete()`
+(soft-delete), leaving active bindings pointing at a now-hidden attribute that still
+rendered on the forms.
+
+### Fix (minimal diff)
+
+- `perform_destroy`: core guard unchanged; added an active-binding guard —
+  `PropertyTypeAttribute.objects.filter(attribute=instance, is_active=True).count()
+  + DealTypeAttribute.objects.filter(attribute=instance, is_active=True).count()`
+  → `400` «این ویژگی به {n} نوع متصل است؛ ابتدا اتصالات را حذف کنید.». Unbound
+  non-core still `instance.delete()` (soft-delete — recoverable via restore/admin,
+  stored EAV values stay readable).
+- `AttributesPage.tsx`: confirm-modal copy for a bound attribute now says the
+  links must be removed first (was «با حذف آن، این وصل‌ها نیز برداشته می‌شوند» —
+  no longer true). Toast already surfaced the server's exact 4xx message
+  (`Array.isArray(data) ? data[0] : data?.detail`), so no toast change was needed.
+
+### Second defect found while greening the suite — `BasicsViewSet.get_queryset`
+
+`BasicsViewSet.get_queryset` returned `self.queryset` (the *class-level* QuerySet)
+directly for `?all=1` (no `.filter()` to clone it). Django caches a QuerySet's
+results on first evaluation, so the first `?all=1` response was replayed, stale,
+for every later request in the process — newly-added/deactivated attributes never
+appeared. This was exposed by the new delete test making a `?all=1` call in an
+earlier class than `AttributeListingTests`. Fix: `queryset = self.queryset.all()`
+(one line, in `apps/basics/views.py`), which also un-stales the property-type /
+deal-type / usage / geography lists.
+
+### Cross-check (Phase-5 signal invalidation)
+
+Create attribute → bind to property type → next
+`/basics/api/schema/property-form/?propertyType=apartment` returns the new field
+(signal invalidation works; verified on the dev DB after the fix).
+
+### Verification
+
+- New Django tests in `apps/basics/tests/test_attribute_admin.py`:
+  `AttributeDeleteTests` (core refusal, bound new-guard refusal + count, unbound
+  soft-delete, restore) and `AttributeAddThenListTests` (created id in `?all=1`).
+- Two pre-existing tests updated to the new bound-delete semantics:
+  `test_api.AttributeManagementTests.test_deleting_an_attribute_is_a_soft_delete`
+  and `test_a_soft_deleted_attribute_can_be_restored` (now delete an *unbound*
+  attribute), and `test_detail_route_visibility.…test_the_same_holds_for_attributes`
+  (uses an unbound attribute so the delete leg stays valid).
+- Full Django suite: **661 tests, 0 failures** (baseline 655 + 6 new).
+- Frontend: `npm run build` OK; vitest 24/24.
+
 ## Stage 7 — precise province/city/district zoom (geocoding) + NO-MOVE fallback
 
 ### Diagnosis (evidence-first)

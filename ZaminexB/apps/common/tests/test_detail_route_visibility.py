@@ -79,7 +79,12 @@ class ReferenceDataDetailRouteTests(TestCase):
         self.assertTrue(self.district.is_active)
 
     def test_the_same_holds_for_attributes(self):
-        attribute = Attribute.objects.filter(is_core=False).first()
+        # An unbound non-core attribute: a bound one is now refused on delete
+        # (Stage 8), so this pins the "deactivated unbound row stays reachable
+        # by id and can still be deleted" behaviour.
+        attribute = Attribute.objects.create(
+            name="unbound_vis", display_name="ویژگی آزاد", data_type="text"
+        )
         self.client.patch(
             f"/basics/api/attributes/{attribute.pk}/",
             {"isActive": False},

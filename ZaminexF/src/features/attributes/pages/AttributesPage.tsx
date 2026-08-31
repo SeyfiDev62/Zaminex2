@@ -743,7 +743,7 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
         message={
           pendingDelete
             ? pendingDelete.usageCount
-              ? `«${pendingDelete.displayName}» به ${pendingDelete.usageCount.toLocaleString("fa-IR")} نوع متصل است. با حذف آن، این وصل‌ها نیز برداشته می‌شوند.`
+              ? `«${pendingDelete.displayName}» به ${pendingDelete.usageCount.toLocaleString("fa-IR")} نوع متصل است؛ ابتدا اتصال‌های آن را جدا کنید تا حذف امکان‌پذیر شود.`
               : `ویژگی «${pendingDelete.displayName}» برای همیشه حذف می‌شود. آیا مطمئن هستید؟`
             : ""
         }
