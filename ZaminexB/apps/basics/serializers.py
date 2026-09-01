@@ -119,7 +119,7 @@ class AttributeSerializer(serializers.ModelSerializer):
         model = Attribute
         fields = [
             "id", "name", "displayName", "dataType", "inputType", "filterType",
-            "entity", "unit", "isFacility", "isCore", "coreField",
+            "entity", "unit", "category", "isFacility", "isCore", "coreField",
             "sortOrder", "isActive", "options", "usageCount",
         ]
 

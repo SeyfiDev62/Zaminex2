@@ -9,6 +9,7 @@ from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 
 from .activity import log_activity
+from .labels import status_label
 
 
 def skip_on_raw(handler):
@@ -68,7 +69,11 @@ def log_property_save(sender, instance, created, **kwargs):
                 action=action,
                 target_type="property",
                 target_id=instance.pk,
-                description=f"وضعیت ملک «{instance.title}» از {old_status} به {instance.status} تغییر کرد",
+                description=(
+                    f"وضعیت ملک «{instance.title}» از "
+                    f"{status_label('property', old_status)} به "
+                    f"{status_label('property', instance.status)} تغییر کرد"
+                ),
                 metadata={"old_status": old_status, "new_status": instance.status},
             )
         else:
@@ -184,7 +189,10 @@ def log_listing_save(sender, instance, created, **kwargs):
                 action=action,
                 target_type="listing",
                 target_id=instance.pk,
-                description=f"وضعیت آگهی «{instance.title}» به {instance.get_status_display()} تغییر کرد",
+                description=(
+                    f"وضعیت آگهی «{instance.title}» به "
+                    f"{status_label('listing', instance.status)} تغییر کرد"
+                ),
                 metadata={"old_status": old_status, "new_status": instance.status},
             )
         else:

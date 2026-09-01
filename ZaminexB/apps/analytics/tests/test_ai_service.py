@@ -1,5 +1,6 @@
 """Tests for the reusable AI description service and its endpoints."""
 
+import datetime
 import io
 import json
 from decimal import Decimal
@@ -7,6 +8,7 @@ from unittest import mock
 
 from django.core.management import call_command
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.accounts.models import ConsultantProfile, User
@@ -410,6 +412,193 @@ class AICacheAndIsolationTests(TestCase):
             get_cached_description(
                 {"name": "احمد"}, entity="consultant", entity_id=self.p1.pk
             )
+
+
+class AIAcceptanceTests(TestCase):
+    """Stage 3 acceptance (T1–T5) for the property AI cache contract.
+
+    Exercises the real ``_property_ai_data`` assembly (report + market
+    metrics) so the tests cover the exact chart fields that used to flip the
+    fingerprint across a day boundary. The LLM transport is mocked at
+    ``_chat_completion`` (and ``_urlopen`` for the unconfigured case) — a
+    real provider is never contacted.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_basics", stdout=io.StringIO())
+        cls.admin = User.objects.create_user(
+            username="ai3-admin", password="pw", role="ADMIN"
+        )
+        cls.agent = User.objects.create_user(
+            username="ai3-agent", password="pw", role="AGENT"
+        )
+        cls.profile = ConsultantProfile.objects.create(
+            user=cls.agent, full_name="زهرا", branch="مرکزی"
+        )
+        cls.prop = Property.objects.create(
+            title="برج آزمایش",
+            internal_code="AI3-1",
+            consultant=cls.agent,
+            area=200,
+            address="تهران",
+            property_type="APARTMENT",
+            latitude=Decimal("35.7"),
+            longitude=Decimal("51.4"),
+        )
+        cls.sale = DealType.objects.get(name="sale")
+        # Active listing with a start_date and no end_date: exactly the shape
+        # that makes charts.spatialScatter[].x and
+        # charts.avgLifespanByChannel[].avgLifespan advance with the clock.
+        cls.listing = Listing.objects.create(
+            property=cls.prop,
+            title="آگهی فعال",
+            publish_channel="WEBSITE",
+            created_by=cls.agent,
+            deal_type=cls.sale,
+            sale_price=Decimal("20000000000"),
+            status="ACTIVE",
+            start_date=timezone.now() - datetime.timedelta(days=10),
+            end_date=None,
+        )
+
+    def setUp(self):
+        from django.core.cache import cache
+
+        from apps.analytics.models import AIInsightCache
+
+        cache.clear()
+        AIInsightCache.objects.all().delete()
+        s = CompanySettings.get_solo()
+        s.ai_enabled = True
+        s.ai_api_base_url = "https://mock.example/v1"
+        s.ai_api_key = "k"
+        s.ai_model = "m"
+        s.save()
+
+    def _raw(self):
+        return (
+            '{"positives":["+1","+2","+3"],"negatives":["-1","-2","-3"],'
+            '"summary":"خلاصه آزمایش"}'
+        )
+
+    def _property_data(self):
+        from apps.analytics.views import _property_ai_data
+
+        return _property_ai_data(self.prop)
+
+    def test_t1_two_opens_no_change_one_provider_call(self):
+        data = self._property_data()
+        with mock.patch(
+            "apps.analytics.ai_service._chat_completion", return_value=self._raw()
+        ) as m:
+            first = get_cached_description(
+                data, entity="property", entity_id=self.prop.pk
+            )
+            second = get_cached_description(
+                data, entity="property", entity_id=self.prop.pk
+            )
+        self.assertEqual(m.call_count, 1)
+        self.assertEqual(first, second)
+
+    def test_t2_price_change_triggers_new_call(self):
+        data_before = self._property_data()
+        with mock.patch(
+            "apps.analytics.ai_service._chat_completion", return_value=self._raw()
+        ) as m:
+            first = get_cached_description(
+                data_before, entity="property", entity_id=self.prop.pk
+            )
+            # A genuine semantic change: the listing price moves.
+            self.listing.sale_price = Decimal("21000000000")
+            self.listing.save(update_fields=["sale_price"])
+            data_after = self._property_data()
+            second = get_cached_description(
+                data_after, entity="property", entity_id=self.prop.pk
+            )
+        self.assertEqual(m.call_count, 2)
+        self.assertEqual(first, second)
+
+    def test_t3_day_boundary_clock_fields_no_new_call(self):
+        """The fingerprint must not flip when only clock-derived chart fields
+        (spatialScatter.x / avgLifespanByChannel.avgLifespan) advance."""
+        from django.core.cache import cache
+
+        from apps.analytics.ai_service import data_fingerprint
+        from apps.analytics.views import _property_ai_data
+
+        tz = timezone.get_current_timezone()
+        day_n = datetime.datetime(2026, 8, 20, 12, 0, 0, tzinfo=tz)
+        day_n1 = datetime.datetime(2026, 8, 21, 12, 0, 0, tzinfo=tz)
+
+        def build(at):
+            cache.clear()  # force a fresh report for this clock instant
+            with mock.patch.object(timezone, "now", return_value=at):
+                return _property_ai_data(self.prop)
+
+        data_n = build(day_n)
+        data_n1 = build(day_n1)
+
+        # Same semantic data → same fingerprint (the bug made these differ).
+        self.assertEqual(
+            data_fingerprint(data_n, entity="property", entity_id=self.prop.pk),
+            data_fingerprint(data_n1, entity="property", entity_id=self.prop.pk),
+        )
+
+        with mock.patch(
+            "apps.analytics.ai_service._chat_completion", return_value=self._raw()
+        ) as m:
+            first = get_cached_description(
+                data_n, entity="property", entity_id=self.prop.pk
+            )
+            second = get_cached_description(
+                data_n1, entity="property", entity_id=self.prop.pk
+            )
+        self.assertEqual(m.call_count, 1)
+        self.assertEqual(first, second)
+
+    def test_t4_unconfigured_no_provider_attempt(self):
+        s = CompanySettings.get_solo()
+        s.ai_enabled = False
+        s.save()
+        data = self._property_data()
+        with mock.patch(
+            "apps.analytics.ai_service._chat_completion"
+        ) as chat_m, mock.patch(
+            "apps.analytics.ai_service._urlopen"
+        ) as urlopen_m:
+            with self.assertRaises(AIError):
+                get_cached_description(
+                    data, entity="property", entity_id=self.prop.pk
+                )
+        chat_m.assert_not_called()
+        urlopen_m.assert_not_called()
+
+    def test_t5_hot_cache_cleared_db_row_serves(self):
+        from django.core.cache import cache
+
+        from apps.analytics.models import AIInsightCache
+
+        data = self._property_data()
+        with mock.patch(
+            "apps.analytics.ai_service._chat_completion", return_value=self._raw()
+        ) as m:
+            first = get_cached_description(
+                data, entity="property", entity_id=self.prop.pk
+            )
+            # Drop only the hot cache layer; the DB row stays intact.
+            cache.clear()
+            self.assertEqual(
+                AIInsightCache.objects.filter(
+                    entity="property", entity_id=self.prop.pk
+                ).count(),
+                1,
+            )
+            second = get_cached_description(
+                data, entity="property", entity_id=self.prop.pk
+            )
+        self.assertEqual(m.call_count, 1)
+        self.assertEqual(first, second)
 
 
 class AIModelAdminRequiredTests(TestCase):

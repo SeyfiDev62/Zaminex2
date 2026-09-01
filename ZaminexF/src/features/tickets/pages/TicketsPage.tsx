@@ -60,6 +60,13 @@ const STATUS_OPTIONS: Array<{ value: TicketStatus | "all"; label: string }> = [
 
 const PAGE_SIZE = 20;
 
+// «مهلت پاسخ گذشته» — the overdue-SLA label, shared across the list-row span,
+// the detail badge and the filter dropdown so the three sites never drift
+// apart. Tickets UI labels live in this file (see SUBJECT_OPTIONS / STATUS_OPTIONS
+// above); shared/lib/constants.ts only holds backend-code → label maps, so this
+// single string belongs here rather than there.
+const SLA_OVERDUE_LABEL = "مهلت پاسخ گذشته";
+
 const subjectLabel = (type: TicketSubjectType) =>
   SUBJECT_OPTIONS.find((item) => item.value === type)?.label || type;
 
@@ -738,7 +745,7 @@ function TicketFilters({
             onChange={(value) => setFilter("overdue", value === "all" ? "" : value)}
             options={[
               { value: "all", label: "همه مهلت‌ها" },
-              { value: "true", label: "SLA گذشته" },
+              { value: "true", label: SLA_OVERDUE_LABEL },
               { value: "upcoming", label: "سررسید در ۱۲ ساعت آینده" },
               { value: "open", label: "در مهلت (بیش از ۱۲ ساعت)" },
             ]}
@@ -870,7 +877,7 @@ function TicketDetailPanel({
               <Tag size={10} />{tag}
             </span>
           ))}
-          {detail.isOverdue && <Badge label="SLA گذشته" variant="danger" />}
+          {detail.isOverdue && <Badge label={SLA_OVERDUE_LABEL} variant="danger" />}
           {detail.slaDueAt && !detail.isOverdue && <span className="text-[11px] text-muted-foreground flex items-center gap-1"><Clock3 size={11} />مهلت {formatJalaliDT(detail.slaDueAt)}</span>}
         </div>
       </div>
@@ -1113,7 +1120,7 @@ function TicketListPage({
           <div className="flex items-center justify-between px-4 py-3 border-b border-border"><div className="flex items-center gap-2 text-sm font-semibold"><MessageSquare size={15} className="text-primary" />{pageTitle}</div><button type="button" onClick={() => void loadRows()} className="text-muted-foreground hover:text-primary" title="بروزرسانی"><RefreshCw size={14} /></button></div>
           {loading ? <div className="p-8 flex justify-center text-muted-foreground"><Loader2 size={20} className="animate-spin" /></div> : error ? <div className="m-4 rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">{error}</div> : rows.length === 0 ? <EmptyState icon={<MessageSquare size={26} />} title="تیکتی یافت نشد" description="با فیلترهای فعلی تیکتی برای نمایش وجود ندارد." /> : <div className="divide-y divide-border">{rows.map((row) => <button type="button" key={String(row.id)} onClick={() => setSelectedId(String(row.id))} className={`w-full text-right p-4 transition-colors hover:bg-secondary/50 ${selectedId === String(row.id) ? "bg-primary/[0.04]" : ""} ${row.isUnread ? "font-semibold border-r-4 border-r-primary bg-primary/[0.035]" : ""}`}>
             <div className="flex items-start gap-3"><div className={`mt-1 w-2.5 h-2.5 rounded-full flex-shrink-0 ${row.isUnread ? "bg-primary ring-4 ring-primary/10" : "bg-border"}`} />
-              <div className="flex-1 min-w-0"><div className="flex items-center gap-2 flex-wrap"><span className="font-mono text-[11px] text-muted-foreground">{row.ticketNumber}</span><span className="text-sm truncate">{row.title}</span>{row.isUnread && <Badge label="جدید" variant="info" />}</div><div className="flex items-center gap-1.5 mt-2 flex-wrap"><Badge label={row.statusLabel} variant={statusTone(row.status)} /><Badge label={row.priorityLabel} variant={priorityTone(row.priority)} /><span className="text-[11px] text-muted-foreground">{typeLabel(row.ticketType)} · {row.subject?.restricted ? "موضوع محدود" : row.subject?.label}</span></div><div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground flex-wrap"><span className="flex items-center gap-1"><UserRound size={11} />{folder === "sent" ? `به ${row.recipients?.map(displayUser).join("، ") || "—"}` : `از ${displayUser(row.createdBy)}`}</span><span>{formatJalaliDT(row.lastMessageAt || row.createdAt)}</span><span>{row.replyCount.toLocaleString("fa-IR")} پاسخ</span>{row.needsResponse && <span className="text-amber-600">در انتظار پاسخ من</span>}{row.isOverdue && <span className="text-destructive">SLA گذشته</span>}</div></div>
+              <div className="flex-1 min-w-0"><div className="flex items-center gap-2 flex-wrap"><span className="font-mono text-[11px] text-muted-foreground">{row.ticketNumber}</span><span className="text-sm truncate">{row.title}</span>{row.isUnread && <Badge label="جدید" variant="info" />}</div><div className="flex items-center gap-1.5 mt-2 flex-wrap"><Badge label={row.statusLabel} variant={statusTone(row.status)} /><Badge label={row.priorityLabel} variant={priorityTone(row.priority)} /><span className="text-[11px] text-muted-foreground">{typeLabel(row.ticketType)} · {row.subject?.restricted ? "موضوع محدود" : row.subject?.label}</span></div><div className="flex items-center gap-3 mt-2 text-[11px] text-muted-foreground flex-wrap"><span className="flex items-center gap-1"><UserRound size={11} />{folder === "sent" ? `به ${row.recipients?.map(displayUser).join("، ") || "—"}` : `از ${displayUser(row.createdBy)}`}</span><span>{formatJalaliDT(row.lastMessageAt || row.createdAt)}</span><span>{row.replyCount.toLocaleString("fa-IR")} پاسخ</span>{row.needsResponse && <span className="text-amber-600">در انتظار پاسخ من</span>}{row.isOverdue && <span className="text-destructive">{SLA_OVERDUE_LABEL}</span>}</div></div>
             </div>
           </button>)}</div>}
           {!loading && total > 0 && <div className="p-3 border-t border-border"><Pagination page={listPage} total={total} pageSize={PAGE_SIZE} onPageChange={setListPage} /></div>}

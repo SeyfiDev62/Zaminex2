@@ -359,7 +359,7 @@ interface PropertiesPageProps {
   openPropertyDetail: (id: string) => void;
   openPropertyEdit: (id: string) => void;
   onArchive: (id: string) => void;
-  onDelete: (id: string) => void;
+  onDelete: (id: string) => Promise<boolean>;
   onToggleShared?: (id: string) => Promise<boolean>;
   consultants: any[];
   districtsList?: string[];

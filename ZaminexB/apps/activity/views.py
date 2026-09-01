@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 
 from apps.accounts.models import UserRole
 
+from .labels import translate_description
 from .models import ActivityLog
 
 User = get_user_model()
@@ -104,7 +105,7 @@ class ActivityLogListView(APIView):
                 "targetType": log.target_type,
                 "targetTypeLabel": log.get_target_type_display(),
                 "targetId": log.target_id,
-                "description": log.description,
+                "description": translate_description(log.description, log.target_type),
                 "metadata": log.metadata,
                 "createdAt": log.created_at.isoformat(),
             })

@@ -6,8 +6,8 @@ import datetime
 
 
 class UserRole(models.TextChoices):
-    ADMIN = "ADMIN", "Admin"
-    AGENT = "AGENT", "Agent"
+    ADMIN = "ADMIN", "مدیر"
+    AGENT = "AGENT", "مشاور"
 
 
 class User(AbstractUser):

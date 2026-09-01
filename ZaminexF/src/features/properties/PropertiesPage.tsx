@@ -145,7 +145,10 @@ function PropertiesPage({
       }
 
       const url = `/properties/api/properties/?${params.toString()}`;
-      const res = await apiFetch(url, { method: "GET" }, csrfToken);
+      // no-store: this list is the user's own live data; a cached copy would
+      // resurface a row that was just deleted (the server also sends
+      // Cache-Control: no-store — this is belt-and-suspenders on the client).
+      const res = await apiFetch(url, { method: "GET", cache: "no-store" }, csrfToken);
       if (!res.ok) throw new Error("خطا در دریافت املاک");
       const data = await res.json();
       if (Array.isArray(data)) {
@@ -172,6 +175,34 @@ function PropertiesPage({
   useEffect(() => {
     fetchServerProperties();
   }, [fetchServerProperties]);
+
+  // After a confirmed delete, drop the row(s) from the page's OWN list state
+  // in the same tick (no waiting for a refetch), then re-sync from the server.
+  // If that empties a non-first page, step back a page so the list lands on a
+  // populated page instead of an empty one (server-side pagination would
+  // otherwise return an empty page for an out-of-range page number).
+  const applyLocalRemoval = useCallback(
+    (ids: string[]) => {
+      const idSet = new Set(ids);
+      const removedOnThisPage = serverProperties.filter((p) => idSet.has(String(p.id))).length;
+      setServerProperties((prev) => prev.filter((p) => !idSet.has(String(p.id))));
+      setTotalCount((t) => Math.max(0, t - ids.length));
+      setSelected((s) => {
+        const next = new Set(s);
+        ids.forEach((id) => next.delete(id));
+        return next;
+      });
+      if (removedOnThisPage > 0 && removedOnThisPage >= serverProperties.length && currentPage > 1) {
+        // The whole current page just disappeared: step back (the effect above
+        // re-fetches the now-last page).
+        setCurrentPage((pg) => pg - 1);
+      } else {
+        // Re-fetch (no-store) so the shifted rows and the total count re-sync.
+        fetchServerProperties();
+      }
+    },
+    [serverProperties, currentPage, fetchServerProperties]
+  );
 
   // When filters change, page already reset to 1 via setFilter
   // Sorting is client-side on current page only for minimal change
@@ -427,8 +458,13 @@ function PropertiesPage({
                   setSelected(new Set());
                 }}
                 onDelete={() => {
-                  selected.forEach((id) => onDelete(id));
+                  const ids = Array.from(selected);
                   setSelected(new Set());
+                  void (async () => {
+                    const results = await Promise.all(ids.map((id) => onDelete(id)));
+                    const okIds = ids.filter((_, i) => results[i]);
+                    if (okIds.length > 0) applyLocalRemoval(okIds);
+                  })();
                 }}
                 onClear={() => setSelected(new Set())}
               />
@@ -565,8 +601,19 @@ function PropertiesPage({
         danger
         message="این ملک و تمام داده‌های مرتبط با آن برای همیشه حذف خواهند شد. این عملیات غیرقابل بازگشت است."
         onConfirm={() => {
-          if (confirmDelete) onDelete(confirmDelete);
+          if (!confirmDelete) {
+            setConfirmDelete(null);
+            return;
+          }
+          const id = confirmDelete;
           setConfirmDelete(null);
+          // The row is removed locally at the moment of success (the page owns
+          // its list state); a failed delete leaves the row untouched — the
+          // App-level handler already toasts the server's message.
+          void (async () => {
+            const ok = await onDelete(id);
+            if (ok) applyLocalRemoval([id]);
+          })();
         }}
         onCancel={() => setConfirmDelete(null)}
       />

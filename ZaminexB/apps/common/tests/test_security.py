@@ -320,30 +320,45 @@ class AIUrlGuardTests(TestCase):
 
 class ProtectedMediaTests(TestCase):
     def setUp(self):
+        from django.core.files.base import ContentFile
+        from apps.properties.models import PropertyImage, PropertyAppraisalReport
+
         self.admin = _user("media-admin", UserRole.ADMIN)
         self.owner = _user("media-owner", UserRole.AGENT)
         self.other = _user("media-other", UserRole.AGENT)
-        ConsultantProfile.objects.create(
-            user=self.owner, full_name="Owner", branch="B"
+        self.owner_profile = ConsultantProfile.objects.create(
+            user=self.owner,
+            full_name="Owner",
+            branch="B",
+            profile_image=ContentFile(b"avatar-bytes", name="consultants/profile/owner.png"),
         )
         self.prop = _property("MEDIA-1", self.owner)
         # Avoid touching disk: use an in-memory file for the DB row.
-        from django.core.files.base import ContentFile
-        from apps.properties.models import PropertyImage
         self.image = PropertyImage.objects.create(
             property=self.prop,
             image=ContentFile(b"png-bytes", name="properties/images/secret.png"),
         )
         self.rel_path = self.image.image.name
+        self.appraisal = PropertyAppraisalReport.objects.create(
+            property=self.prop,
+            file=ContentFile(b"%PDF-1.4 appraisal", name="appraisal.pdf"),
+            original_filename="appraisal.pdf",
+            file_size=17,
+        )
+        self.appraisal_rel_path = self.appraisal.file.name
+        self.avatar_rel_path = self.owner_profile.profile_image.name
 
     def test_anonymous_is_denied(self):
         resp = self.client.get(f"/media/{self.rel_path}")
         self.assertEqual(resp.status_code, 403)
 
-    def test_other_consultant_cannot_download(self):
+    def test_other_consultant_can_download_image(self):
+        # Property images are part of the read model: the list/detail API
+        # already hands the URL to every consultant, so the media endpoint
+        # must serve it (any authenticated user).
         self.client.force_login(self.other)
         resp = self.client.get(f"/media/{self.rel_path}")
-        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.status_code, 200)
 
     def test_owner_and_admin_can_download(self):
         self.client.force_login(self.owner)
@@ -364,3 +379,38 @@ class ProtectedMediaTests(TestCase):
         self.client.force_login(self.other)
         resp = self.client.get(f"/media/{self.rel_path}")
         self.assertEqual(resp.status_code, 200)
+
+    def test_other_consultant_cannot_download_appraisal_pdf(self):
+        # Appraisal PDFs are sensitive documents: owner/shared only.
+        self.client.force_login(self.other)
+        resp = self.client.get(f"/media/{self.appraisal_rel_path}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_owner_and_admin_can_download_appraisal_pdf(self):
+        self.client.force_login(self.owner)
+        resp = self.client.get(f"/media/{self.appraisal_rel_path}")
+        self.assertEqual(resp.status_code, 200)
+        self.client.force_login(self.admin)
+        resp = self.client.get(f"/media/{self.appraisal_rel_path}")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_other_consultant_cannot_download_avatar(self):
+        # Consultant avatars are own-only for non-admins.
+        self.client.force_login(self.other)
+        resp = self.client.get(f"/media/{self.avatar_rel_path}")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_owner_and_admin_can_download_avatar(self):
+        self.client.force_login(self.owner)
+        resp = self.client.get(f"/media/{self.avatar_rel_path}")
+        self.assertEqual(resp.status_code, 200)
+        self.client.force_login(self.admin)
+        resp = self.client.get(f"/media/{self.avatar_rel_path}")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_unknown_media_path_is_denied(self):
+        # A guessed path that maps to no tracked file stays denied even for
+        # an authenticated consultant.
+        self.client.force_login(self.other)
+        resp = self.client.get("/media/properties/images/does-not-exist.png")
+        self.assertEqual(resp.status_code, 403)

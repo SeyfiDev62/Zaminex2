@@ -4,9 +4,8 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Search, Crosshair, MapPin, Check, Loader2 } from "lucide-react";
 import {
-  IRAN_DEFAULT_CENTER,
-  IRAN_DEFAULT_ZOOM,
-  IRAN_PROVINCE_CENTERS,
+  DEFAULT_VIEW_CENTER,
+  DEFAULT_VIEW_ZOOM,
   resolvePlaceCoordinates,
   type LatLng,
 } from "../../lib/iranLocations";
@@ -17,17 +16,11 @@ import {
   PropertyMarkerPopupBody,
 } from "./PropertyMarkerPopup";
 
-// Leaflet's default marker icons don't resolve from bundlers; build one inline.
-const centerMarkerIcon = L.divIcon({
-  className: "zaminex-map-pin",
-  // The fixed selection marker: always rendered at the map centre, so it
-  // stays in the middle of the frame while the user drags the map around it.
-  html: `<div style="display:flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:9999px;background:rgba(255,255,255,0.96);border:3px solid #0BB68A;box-shadow:0 4px 10px rgba(0,0,0,0.28);">
-           <div style="width:9px;height:9px;border-radius:9999px;background:#0BB68A;"></div>
-         </div>`,
-  iconSize: [30, 30],
-  iconAnchor: [15, 15],
-});
+// The fixed selection marker: the SAME teardrop pin as the located-property
+// markers (identical template/size/anchor via makePinIcon) in the fixed
+// primary green, so its tip lands exactly on the map centre and stays there
+// while the user drags the map around it.
+const centerMarkerIcon = makePinIcon("#0BB68A");
 
 function roundCoord(n: number): number {
   // Backend DecimalField(max_digits=9, decimal_places=6) rejects raw Leaflet
@@ -124,7 +117,7 @@ function PropertyMapPicker({
 
   // Live map centre — the position of the fixed marker. The coordinates
   // rendered under the map and the confirm-button state both follow this.
-  const [center, setCenter] = useState<LatLng>(value ?? IRAN_DEFAULT_CENTER);
+  const [center, setCenter] = useState<LatLng>(value ?? DEFAULT_VIEW_CENTER);
   const centerRef = useRef(center);
   centerRef.current = center;
   const onCenter = useCallback((c: LatLng) => setCenter(c), []);
@@ -208,19 +201,27 @@ function PropertyMapPicker({
       }
 
       if (!name) {
-        if (!value) setFocusTarget({ location: IRAN_DEFAULT_CENTER, zoom: IRAN_DEFAULT_ZOOM });
+        if (!value) setFocusTarget({ location: DEFAULT_VIEW_CENTER, zoom: DEFAULT_VIEW_ZOOM });
         return;
       }
       const kind = districtName ? "district" : cityName ? "city" : "province";
-      const resolved = await resolvePlaceCoordinates(name, kind, { provinceName, cityName });
+      const resolved = await resolvePlaceCoordinates(
+        name,
+        kind,
+        { provinceName, cityName },
+        { variants: true }
+      );
       if (cancelled) return;
       if (resolved) {
         const zoom = districtName ? 15 : cityName ? 12 : 8;
         setFocusTarget({ location: resolved, zoom });
-      } else if (!value && provinceName) {
-        // fallback to the province centre when a district/city lookup fails
-        const p = IRAN_PROVINCE_CENTERS[provinceName];
-        if (p) setFocusTarget({ location: p, zoom: 9 });
+      } else if (kind !== "province") {
+        // NO-MOVE fallback: city/district resolution failed (offline / not
+        // found) — do NOT fly anywhere; show the short auto-dismissing notice
+        // instead. Province still zooms from the static table (no internet).
+        if (noResultTimer.current) clearTimeout(noResultTimer.current);
+        setSearchNoResult(true);
+        noResultTimer.current = setTimeout(() => setSearchNoResult(false), 7000);
       }
     };
     run();
@@ -284,8 +285,8 @@ function PropertyMapPicker({
   const dirty =
     !value || !sameCoord(center[0], value[0]) || !sameCoord(center[1], value[1]);
 
-  const initialCenter: LatLng = value ?? focusTarget?.location ?? IRAN_DEFAULT_CENTER;
-  const initialZoom = value ? 16 : focusTarget?.zoom ?? IRAN_DEFAULT_ZOOM;
+  const initialCenter: LatLng = value ?? focusTarget?.location ?? DEFAULT_VIEW_CENTER;
+  const initialZoom = value ? 16 : focusTarget?.zoom ?? DEFAULT_VIEW_ZOOM;
 
   const consultantIds = useMemo(() => located.map((p) => p.consultantId), [located]);
   const iconCache = useRef(new Map<string, L.DivIcon>());
@@ -362,11 +363,11 @@ function PropertyMapPicker({
         </MapContainer>
 
         {/* Live marker coordinates — update in real time while the map moves. */}
-        <div className="pointer-events-none absolute bottom-2 left-2 bg-white/95 backdrop-blur rounded-lg px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm font-mono">
+        <div className="pointer-events-none absolute bottom-2 left-2 z-[1000] bg-white/95 backdrop-blur rounded-lg px-2.5 py-1.5 text-[11px] text-muted-foreground shadow-sm font-mono">
           {center[0].toFixed(6)}, {center[1].toFixed(6)}
         </div>
         {value && (
-          <div className="pointer-events-none absolute top-2 right-2 bg-white/95 rounded-lg px-2 py-1 text-[11px] text-emerald-700 font-semibold flex items-center gap-1 shadow-sm">
+          <div className="pointer-events-none absolute top-2 right-12 z-[1000] bg-white/95 rounded-lg px-2 py-1 text-[11px] text-emerald-700 font-semibold flex items-center gap-1 shadow-sm">
             <MapPin size={11} />موقعیت ثبت شد
           </div>
         )}
@@ -389,7 +390,7 @@ function PropertyMapPicker({
         )}
       </div>
 
-      <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground">
+      <div className="flex flex-nowrap items-center gap-3 overflow-x-auto whitespace-nowrap text-[11px] text-muted-foreground">
         <span>کشیدن نقشه برای جابه‌جایی مارکر</span>
         <span>·</span>
         <span>دکمه «تایید موقعیت ملک» برای ثبت نقطه</span>

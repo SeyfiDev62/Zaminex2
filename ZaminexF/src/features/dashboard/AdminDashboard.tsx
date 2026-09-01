@@ -341,12 +341,12 @@ function AdminDashboard({
         ) : (
           <>
             <PropertyDistributionMap points={locatedProperties} colorMode="consultant" badgeLabel="نقشهٔ توزیع املاک" />
-            <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-1.5 max-h-36 overflow-y-auto rounded-lg border border-border p-2">
               {consultantColorLegend.map((row) => (
-                <span key={row.id} className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: row.color }} />
-                  {row.name}
-                  <span className="font-semibold text-foreground/70">{row.count.toLocaleString("fa-IR")}</span>
+                <span key={row.id} className="flex items-center gap-1.5 text-[11px] text-muted-foreground min-w-0">
+                  <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: row.color }} />
+                  <span className="min-w-0 truncate" title={row.name}>{row.name}</span>
+                  <span className="font-semibold text-foreground/70 flex-shrink-0">{row.count.toLocaleString("fa-IR")}</span>
                 </span>
               ))}
             </div>

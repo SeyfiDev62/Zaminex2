@@ -91,7 +91,12 @@ class BasicsViewSet(viewsets.ModelViewSet):
         own id, so the management screen could switch something off and then be
         unable to delete or reactivate it.
         """
-        queryset = self.queryset
+        # ``.all()`` is mandatory: without it the *class-level* ``self.queryset``
+        # object is returned as-is for ``?all=1`` (no ``.filter()`` to clone it),
+        # and Django caches a QuerySet's results on first evaluation. The first
+        # ``?all=1`` response would then be replayed, stale, for every later
+        # request in the process (new attributes/deactivations never appear).
+        queryset = self.queryset.all()
         if self.action == "list" and self.request.query_params.get("all") not in {
             "1",
             "true",
@@ -181,13 +186,33 @@ class AttributeViewSet(BasicsViewSet):
         return queryset
 
     def perform_destroy(self, instance):
-        """Core attributes are wired to real columns and cannot be removed."""
-        if instance.is_core:
-            from rest_framework.exceptions import ValidationError
+        """Guard attribute removal, then soft-delete.
 
+        * core → refused (wired to real columns);
+        * bound (active PropertyTypeAttribute / DealTypeAttribute) → refused,
+          otherwise the soft-delete would orphan bindings that keep pointing at
+          a hidden attribute and still render on the forms;
+        * unbound non-core → soft-deleted (hidden from the UI; recoverable via
+          the ``restore`` endpoint / Django admin, and stored EAV values stay
+          readable).
+        """
+        from rest_framework.exceptions import ValidationError
+
+        if instance.is_core:
             raise ValidationError(
                 "ویژگی‌های ثابت به ستون‌های پایگاه داده متصل هستند و قابل حذف نیستند."
             )
+
+        bound_count = PropertyTypeAttribute.objects.filter(
+            attribute=instance, is_active=True
+        ).count() + DealTypeAttribute.objects.filter(
+            attribute=instance, is_active=True
+        ).count()
+        if bound_count:
+            raise ValidationError(
+                f"این ویژگی به {bound_count} نوع متصل است؛ ابتدا اتصالات را حذف کنید."
+            )
+
         instance.delete()
 
     @action(detail=True, methods=["get", "post"], url_path="options")

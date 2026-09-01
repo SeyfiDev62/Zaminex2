@@ -532,3 +532,131 @@ class AttributeListingTests(TestCase):
         rows = self.client.get("/basics/api/attributes/?all=1").json()
         area = next(a for a in rows if a["name"] == "area")
         self.assertTrue(area["isCore"])
+
+
+class AttributeDeleteTests(CacheClearingMixin, TestCase):
+    """Delete semantics for the attributes-management screen.
+
+    Stage 8: a bound attribute used to soft-delete while leaving its active
+    bindings pointing at the now-hidden row (orphaned bindings). Core stays
+    refused; bound gets a NEW guard; unbound non-core soft-deletes (recoverable
+    via the ``restore`` endpoint / Django admin, and stored values stay intact).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_basics", stdout=io.StringIO())
+        cls.admin = User.objects.create_user(
+            username="del-admin", password="pw", role="ADMIN"
+        )
+        cls.apartment = PropertyType.objects.get(name="apartment")
+        cls.sale = DealType.objects.get(name="sale")
+
+    def setUp(self):
+        self.client.force_login(self.admin)
+
+    def test_core_attribute_delete_is_refused(self):
+        core = Attribute.objects.filter(is_core=True).first()
+        response = self.client.delete(f"/basics/api/attributes/{core.pk}/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()[0],
+            "ویژگی‌های ثابت به ستون‌های پایگاه داده متصل هستند و قابل حذف نیستند.",
+        )
+        # Still present (not deleted).
+        self.assertTrue(Attribute.all_objects.filter(pk=core.pk).exists())
+
+    def test_bound_attribute_delete_is_refused_with_new_guard(self):
+        attr = Attribute.objects.create(
+            name="bound_attr", display_name="ویژگی متصل", data_type="text",
+            entity=Attribute.Entity.PROPERTY,
+        )
+        PropertyTypeAttribute.objects.create(
+            property_type=self.apartment, attribute=attr, sort_order=50
+        )
+        response = self.client.delete(f"/basics/api/attributes/{attr.pk}/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()[0],
+            "این ویژگی به 1 نوع متصل است؛ ابتدا اتصالات را حذف کنید.",
+        )
+        # Not deleted, binding intact (no orphan).
+        self.assertIsNone(Attribute.all_objects.get(pk=attr.pk).deleted_at)
+        self.assertTrue(PropertyTypeAttribute.objects.filter(attribute=attr).exists())
+
+    def test_bound_attribute_guard_counts_all_active_bindings(self):
+        attr = Attribute.objects.create(
+            name="multi_bound", display_name="ویژگی چندمتصل", data_type="text",
+            entity=Attribute.Entity.PROPERTY,
+        )
+        PropertyTypeAttribute.objects.create(
+            property_type=self.apartment, attribute=attr, sort_order=10
+        )
+        # A second property type binding.
+        land = PropertyType.objects.create(
+            name="land_del", display_name="زمین حذف",
+            property_usage=self.apartment.property_usage, sort_order=99,
+        )
+        PropertyTypeAttribute.objects.create(
+            property_type=land, attribute=attr, sort_order=20
+        )
+        response = self.client.delete(f"/basics/api/attributes/{attr.pk}/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()[0],
+            "این ویژگی به 2 نوع متصل است؛ ابتدا اتصالات را حذف کنید.",
+        )
+
+    def test_unbound_non_core_attribute_soft_deletes_and_leaves_the_list(self):
+        attr = Attribute.objects.create(
+            name="unbound_attr", display_name="ویژگی آزاد", data_type="text",
+            entity=Attribute.Entity.PROPERTY,
+        )
+        response = self.client.delete(f"/basics/api/attributes/{attr.pk}/")
+        self.assertEqual(response.status_code, 204)
+        # Soft-deleted (hidden from the UI, recoverable), not hard-removed.
+        row = Attribute.all_objects.get(pk=attr.pk)
+        self.assertIsNotNone(row.deleted_at)
+        self.assertFalse(row.is_active)
+        self.assertNotIn(
+            attr.pk,
+            [a["id"] for a in self.client.get("/basics/api/attributes/?all=1").json()],
+        )
+
+    def test_unbound_attribute_can_be_restored(self):
+        attr = Attribute.objects.create(
+            name="restorable", display_name="قابل بازیابی", data_type="text",
+            entity=Attribute.Entity.PROPERTY,
+        )
+        self.client.delete(f"/basics/api/attributes/{attr.pk}/")
+        response = self.client.post(f"/basics/api/attributes/{attr.pk}/restore/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(Attribute.all_objects.get(pk=attr.pk).deleted_at)
+
+
+class AttributeAddThenListTests(CacheClearingMixin, TestCase):
+    """The optimistic insert depends on the POST response carrying an id."""
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_basics", stdout=io.StringIO())
+        cls.admin = User.objects.create_user(
+            username="addlist-admin", password="pw", role="ADMIN"
+        )
+
+    def setUp(self):
+        self.client.force_login(self.admin)
+
+    def test_created_attribute_id_is_present_in_the_all_list(self):
+        created = self.client.post(
+            "/basics/api/attributes/",
+            {"displayName": "ویژگی تازه", "dataType": "text", "entity": "property"},
+            content_type="application/json",
+        )
+        self.assertEqual(created.status_code, 201, created.content[:300])
+        new_id = created.json()["id"]
+        self.assertIsNotNone(new_id)
+
+        everything = self.client.get("/basics/api/attributes/?all=1")
+        self.assertEqual(everything.status_code, 200)
+        self.assertIn(new_id, [a["id"] for a in everything.json()])

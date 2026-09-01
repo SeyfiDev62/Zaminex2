@@ -1,8 +1,12 @@
 import csv
 import datetime
 import io
+import re
 from decimal import Decimal
+from pathlib import Path
+from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.utils import timezone
@@ -15,6 +19,17 @@ from apps.listings.models import Listing
 from apps.properties.models import Property
 from apps.tasks.models import Task
 
+from . import pdf as pdf_mod
+from .caching import cached_property_report
+from .pdf import (
+    _followups_section,
+    _listings_section,
+    _logs_section,
+    _styles,
+    _tasks_section,
+    build_property_pdf,
+    t,
+)
 from .services import compute_property_report, get_property_for_user_or_403
 
 User = get_user_model()
@@ -355,3 +370,392 @@ class PropertyReportPdfExportTests(TestCase):
         self.assertIsNotNone(entry, "PDF export must be recorded in the activity log")
         self.assertEqual(entry.user_id, self.agent.id)
         self.assertEqual(entry.metadata.get("format"), "pdf")
+
+
+# ---------------------------------------------------------------------------
+#  Stage 9 — property PDF: empty-failure hardening + AI section + log tables
+# ---------------------------------------------------------------------------
+
+def _pdf_pages(data: bytes) -> int:
+    """Number of pages via the PDF page-tree ``/Count`` marker."""
+    match = re.search(rb"/Count\s+(\d+)", data)
+    return int(match.group(1)) if match else 0
+
+
+class PropertyPdfContentTests(TestCase):
+    """A fully-populated property renders a valid multi-page PDF."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="pdfc-adm", password="x" * 10, role=UserRole.ADMIN
+        )
+        self.agent = User.objects.create_user(
+            username="pdfc-ag", password="x" * 10, role=UserRole.AGENT,
+            first_name="Sara", last_name="A",
+        )
+        ConsultantProfile.objects.create(user=self.agent, full_name="Sara A", branch="B")
+        self.prop = Property.objects.create(
+            title="Populated",
+            internal_code="POP-1",
+            consultant=self.agent,
+            property_type=Property.PropertyType.APARTMENT,
+            deal_type=Property.DealType.SALE,
+            price=Decimal("2000000000"),
+            area=120,
+            rooms=3,
+            address="addr",
+            neighborhood="N",
+            latitude=Decimal("35.7"),
+            longitude=Decimal("51.4"),
+        )
+        Listing.objects.create(
+            property=self.prop, title="آگهی اصلی",
+            publish_channel=Listing.PublishChannel.WEBSITE,
+            created_by=self.agent, assigned_to=self.agent,
+            start_date=timezone.now() - datetime.timedelta(days=5),
+            sale_price=Decimal("2000000000"),
+        )
+        Task.objects.create(
+            title="بازدید مشتری", assigned_to=self.agent, created_by=self.agent,
+            property=self.prop, due_date=datetime.date.today() + datetime.timedelta(days=2),
+            task_type=Task.TaskType.VIEWING, status=Task.Status.PENDING,
+        )
+        FollowUp.objects.create(
+            title="پیگیری اول", consultant=self.agent, contact_name="مشتری",
+            property=self.prop, probability=60,
+            scheduled_at=timezone.now() - datetime.timedelta(days=2),
+        )
+        ActivityLog.objects.create(
+            user=self.agent, action=ActivityLog.ActionType.CREATE,
+            target_type=ActivityLog.TargetType.PROPERTY, target_id=self.prop.pk,
+            description="ملک ایجاد شد",
+        )
+
+    def test_populated_property_renders_a_valid_multipage_pdf(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        self.assertEqual(res["Content-Type"], "application/pdf")
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+        self.assertGreaterEqual(_pdf_pages(res.content), 2)
+        self.assertGreater(len(res.content), 10_000)
+
+
+class PropertyPdfEmptyHistoryTests(TestCase):
+    """A property with no history still exports, with a per-table placeholder."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="pdfe-adm", password="x" * 10, role=UserRole.ADMIN
+        )
+        self.agent = User.objects.create_user(
+            username="pdfe-ag", password="x" * 10, role=UserRole.AGENT,
+            first_name="E", last_name="A",
+        )
+        ConsultantProfile.objects.create(user=self.agent, full_name="E A", branch="B")
+        self.prop = Property.objects.create(
+            title="Empty",
+            internal_code="EMP-1",
+            consultant=self.agent,
+            property_type=Property.PropertyType.APARTMENT,
+            deal_type=Property.DealType.SALE,
+            area=80,
+            rooms=2,
+            address="addr",
+            neighborhood="N",
+        )
+
+    def test_empty_property_still_exports_a_valid_pdf(self):
+        self.client.force_authenticate(user=self.admin)
+        res = self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+        self.assertGreater(len(res.content), 1000)
+
+    def test_every_history_table_renders_its_placeholder(self):
+        """The four entity tables each emit their «no data» placeholder.
+
+        Extracting reshaped RTL text from a PDF is unreliable, so assert at the
+        story level: each section function must append its placeholder
+        paragraph to the story when the property has no rows.
+
+        A freshly-created property carries one activity event (its own
+        «created» log, written by the post_save signal), so that row is cleared
+        here to exercise the logs-table placeholder too.
+        """
+        ActivityLog.objects.filter(
+            target_type=ActivityLog.TargetType.PROPERTY, target_id=self.prop.pk
+        ).delete()
+
+        story = []
+        styles = _styles()
+        _listings_section(story, styles, self.prop)
+        _tasks_section(story, styles, self.prop)
+        _followups_section(story, styles, self.prop)
+        _logs_section(story, styles, self.prop)
+
+        rendered = [flow.text for flow in story if hasattr(flow, "text")]
+        for placeholder in (
+            "برای این ملک آگهی‌ای ثبت نشده است.",
+            "برای این ملک وظیفه‌ای ثبت نشده است.",
+            "برای این ملک پیگیری‌ای ثبت نشده است.",
+            "لاگ ثبت‌شده‌ای برای این ملک یافت نشد.",
+        ):
+            self.assertIn(t(placeholder), rendered)
+
+    def test_legacy_english_log_rows_render_persian(self):
+        """Legacy rows holding raw English status codes render Persian in the PDF.
+
+        ``t()`` passes pure ASCII through untouched, so if the shared
+        translator failed, the raw codes would remain literal ASCII in the
+        rendered text — the assertion below catches exactly that.
+        """
+        ActivityLog.objects.filter(
+            target_type=ActivityLog.TargetType.PROPERTY, target_id=self.prop.pk
+        ).delete()
+        ActivityLog.objects.create(
+            user=self.agent,
+            action="status_change",
+            target_type="property",
+            target_id=self.prop.pk,
+            description="وضعیت ملک «Empty» از AVAILABLE به RESERVED تغییر کرد",
+        )
+
+        story = []
+        styles = _styles()
+        _logs_section(story, styles, self.prop)
+
+        rendered = [flow.text for flow in story if hasattr(flow, "text")]
+        joined = "\n".join(rendered)
+        for token in ("AVAILABLE", "RESERVED", "Available", "Reserved"):
+            self.assertNotIn(token, joined)
+
+
+class PropertyPdfAiSectionTests(TestCase):
+    """The AI section appears when available and is omitted otherwise —
+    the export never fails or hangs because of AI."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="pdfai-adm", password="x" * 10, role=UserRole.ADMIN
+        )
+        self.agent = User.objects.create_user(
+            username="pdfai-ag", password="x" * 10, role=UserRole.AGENT,
+            first_name="A", last_name="I",
+        )
+        ConsultantProfile.objects.create(user=self.agent, full_name="A I", branch="B")
+        self.prop = Property.objects.create(
+            title="AI Prop",
+            internal_code="AI-1",
+            consultant=self.agent,
+            property_type=Property.PropertyType.APARTMENT,
+            deal_type=Property.DealType.SALE,
+            area=100,
+            rooms=2,
+            address="addr",
+            neighborhood="N",
+        )
+
+    def _export(self):
+        self.client.force_authenticate(user=self.admin)
+        return self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
+
+    def _pdf_size(self):
+        return len(build_property_pdf(self.prop, cached_property_report(self.prop), self.admin))
+
+    def test_ai_section_is_omitted_when_unconfigured(self):
+        # No ai_api_base_url in the test environment → the pipeline raises
+        # AIError, which the PDF build swallows; the export still succeeds.
+        res = self._export()
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+
+    def test_ai_section_is_present_when_available(self):
+        # Size compared at the build level (no HTTP), because every HTTP export
+        # appends a new activity-log row and would confound the delta.
+        base_size = self._pdf_size()
+
+        with mock.patch(
+            "apps.analytics.ai_service.get_cached_description",
+            return_value={
+                "positives": [
+                    "موقعیت مکانی مناسب و قیمت رقابتی",
+                    "دسترسی مناسب به حمل‌ونقل عمومی",
+                ],
+                "negatives": ["روزهای حضور در بازار نسبتاً زیاد است"],
+                "summary": (
+                    "این ملک با متراژ مناسب در محله‌ای پویا قرار دارد و شاخص‌های "
+                    "تعامل آن بالاتر از میانگین محله است."
+                ),
+            },
+        ):
+            enriched_size = self._pdf_size()
+
+        self.assertGreater(enriched_size, base_size)
+
+    def test_ai_failure_does_not_break_the_export(self):
+        with mock.patch(
+            "apps.analytics.ai_service.get_cached_description",
+            side_effect=RuntimeError("provider timeout"),
+        ):
+            # Failure is swallowed: the export still succeeds and stays a
+            # valid PDF, just without the AI section.
+            res = self._export()
+
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+
+
+class PropertyPdfFontFailureTests(TestCase):
+    """A missing/corrupt font is a clean 500 with a Persian detail — never an
+    empty PDF."""
+
+    FONT_REL = Path("static") / "fonts" / "ttf" / "IRAN Rounded.ttf"
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.font_path = Path(settings.BASE_DIR) / cls.FONT_REL
+        cls._original_bytes = cls.font_path.read_bytes()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.font_path.write_bytes(cls._original_bytes)
+        pdf_mod._font_registered = False
+        super().tearDownClass()
+
+    def setUp(self):
+        self.client = APIClient()
+        self.admin = User.objects.create_user(
+            username="pdff-adm", password="x" * 10, role=UserRole.ADMIN
+        )
+        self.agent = User.objects.create_user(
+            username="pdff-ag", password="x" * 10, role=UserRole.AGENT,
+            first_name="F", last_name="A",
+        )
+        ConsultantProfile.objects.create(user=self.agent, full_name="F A", branch="B")
+        self.prop = Property.objects.create(
+            title="Font Prop",
+            internal_code="FNT-1",
+            consultant=self.agent,
+            property_type=Property.PropertyType.APARTMENT,
+            deal_type=Property.DealType.SALE,
+            area=100,
+            rooms=2,
+            address="addr",
+            neighborhood="N",
+        )
+        # Force the next export to (re)load the font from disk.
+        pdf_mod._font_registered = False
+
+    def _export(self):
+        self.client.force_authenticate(user=self.admin)
+        return self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
+
+    def test_missing_font_is_a_clean_500(self):
+        self.font_path.unlink()
+        try:
+            res = self._export()
+            self.assertEqual(res.status_code, 500)
+            self.assertEqual(res.json()["code"], "report_font_unavailable")
+            self.assertIn("فونت", res.json()["detail"])
+            self.assertFalse(res.content.startswith(b"%PDF-"))
+        finally:
+            self.font_path.write_bytes(self._original_bytes)
+
+    def test_corrupted_font_is_a_clean_500(self):
+        corrupted = self._original_bytes.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        self.font_path.write_bytes(corrupted)
+        try:
+            res = self._export()
+            self.assertEqual(res.status_code, 500)
+            self.assertEqual(res.json()["code"], "report_font_unavailable")
+            self.assertIn("فونت", res.json()["detail"])
+            self.assertFalse(res.content.startswith(b"%PDF-"))
+        finally:
+            self.font_path.write_bytes(self._original_bytes)
+
+
+# ---------------------------------------------------------------------------
+#  Stage 10 — consultants may report on their own AND shared properties
+# ---------------------------------------------------------------------------
+
+class PropertyReportAccessMatrixTests(TestCase):
+    """One canonical access rule across JSON, CSV and PDF.
+
+    A consultant may report on a property they own or that is shared with
+    them (``is_shared``); anything else is 403. Admin sees everything. The
+    three formats must agree on the same status for every (user, property).
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = User.objects.create_user(
+            username="mx-admin", password="x" * 10, role=UserRole.ADMIN
+        )
+        cls.a = User.objects.create_user(
+            username="mx-a", password="x" * 10, role=UserRole.AGENT, first_name="A", last_name="X"
+        )
+        cls.b = User.objects.create_user(
+            username="mx-b", password="x" * 10, role=UserRole.AGENT, first_name="B", last_name="X"
+        )
+        cls.c = User.objects.create_user(
+            username="mx-c", password="x" * 10, role=UserRole.AGENT, first_name="C", last_name="X"
+        )
+        for user in (cls.a, cls.b, cls.c):
+            ConsultantProfile.objects.create(user=user, full_name=user.first_name, branch="x")
+
+        def mk(title, code, owner, shared=False):
+            return Property.objects.create(
+                title=title, internal_code=code, consultant=owner,
+                property_type=Property.PropertyType.APARTMENT,
+                deal_type=Property.DealType.SALE,
+                price=Decimal("1000000000"), area=100, rooms=2,
+                address="addr", neighborhood="n", is_shared=shared,
+            )
+
+        cls.p1 = mk("P1", "P1", cls.a, shared=False)   # A-owned, not shared
+        cls.p2 = mk("P2", "P2", cls.a, shared=True)    # A-owned, shared
+        cls.p3 = mk("P3", "P3", cls.b, shared=False)   # B-owned, not shared
+
+    def _statuses(self, user, prop):
+        client = APIClient()
+        client.force_authenticate(user=user)
+        return (
+            client.get(f"/api/reports/properties/{prop.pk}/").status_code,
+            client.get(f"/api/reports/properties/{prop.pk}/export/").status_code,
+            client.get(f"/api/reports/properties/{prop.pk}/export-pdf/").status_code,
+        )
+
+    def test_access_matrix_is_consistent_across_formats(self):
+        matrix = [
+            (self.a, self.p1, 200),
+            (self.a, self.p2, 200),
+            (self.a, self.p3, 403),
+            (self.b, self.p1, 403),
+            (self.b, self.p2, 200),
+            (self.b, self.p3, 200),
+            (self.c, self.p1, 403),
+            (self.c, self.p2, 200),
+            (self.c, self.p3, 403),
+        ]
+        for user, prop, expected in matrix:
+            with self.subTest(user=user.username, property=prop.internal_code):
+                json_status, csv_status, pdf_status = self._statuses(user, prop)
+                self.assertEqual(json_status, expected)
+                self.assertEqual(csv_status, expected)
+                self.assertEqual(pdf_status, expected)
+                # The consistency assertion is the point of this stage.
+                self.assertEqual(json_status, csv_status)
+                self.assertEqual(csv_status, pdf_status)
+
+    def test_admin_can_access_every_property(self):
+        for prop in (self.p1, self.p2, self.p3):
+            with self.subTest(property=prop.internal_code):
+                json_status, csv_status, pdf_status = self._statuses(self.admin, prop)
+                self.assertEqual(json_status, 200)
+                self.assertEqual(csv_status, 200)
+                self.assertEqual(pdf_status, 200)

@@ -290,6 +290,10 @@ function EditPropertyWizard({
     const result = await onSubmit(mapFormToPayload(), propertyId);
     if (result?.ok) {
       toast({ type: "success", message: "تغییرات با موفقیت ذخیره شد." });
+      // Land on the saved property's detail page (the handler already set
+      // selectedPropertyId to the saved id), so the user sees the updated
+      // values instead of staying on the form.
+      navigate("property-detail");
     }
   };
 

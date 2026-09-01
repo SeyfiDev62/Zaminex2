@@ -6,24 +6,24 @@ from apps.common.attribute_values import BaseAttributeValue
 
 class Listing(models.Model):
     class Status(models.TextChoices):
-        DRAFT = "DRAFT", "Draft"
-        ACTIVE = "ACTIVE", "Active"
-        PAUSED = "PAUSED", "Paused"
-        SOLD = "SOLD", "Sold"
-        EXPIRED = "EXPIRED", "Expired"
-        ARCHIVED = "ARCHIVED", "Archived"
+        DRAFT = "DRAFT", "پیش‌نویس"
+        ACTIVE = "ACTIVE", "منتشرشده (فعال)"
+        PAUSED = "PAUSED", "متوقف‌شده"
+        SOLD = "SOLD", "فروخته‌شده"
+        EXPIRED = "EXPIRED", "منقضی‌شده"
+        ARCHIVED = "ARCHIVED", "بایگانی‌شده"
 
     class PublishChannel(models.TextChoices):
-        WEBSITE = "WEBSITE", "Website"
-        INSTAGRAM = "INSTAGRAM", "Instagram"
-        TELEGRAM = "TELEGRAM", "Telegram"
-        OTHER = "OTHER", "Other"
+        WEBSITE = "WEBSITE", "وب‌سایت"
+        INSTAGRAM = "INSTAGRAM", "اینستاگرام"
+        TELEGRAM = "TELEGRAM", "تلگرام"
+        OTHER = "OTHER", "سایر"
 
     class Priority(models.IntegerChoices):
-        LOW = 1, "Low"
-        NORMAL = 2, "Normal"
-        HIGH = 3, "High"
-        URGENT = 4, "Urgent"
+        LOW = 1, "اولویت کم"
+        NORMAL = 2, "اولویت عادی"
+        HIGH = 3, "اولویت بالا"
+        URGENT = 4, "اولویت فوری"
 
     property = models.ForeignKey(
         "properties.Property",
