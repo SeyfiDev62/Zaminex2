@@ -155,25 +155,7 @@ Your data stays. No need to use `seed_data.json` again.
 
 ---
 
-## 6. Ticket Workspace
-
-The internal ticket workspace is available to both roles under the `تیکت‌ها` menu.
-
-- Consultants have sent, received, and create-ticket tabs.
-- Admins additionally have an all-tickets monitoring tab with server-side filters and CSV export.
-- A ticket is linked to exactly one property, listing, follow-up, task, or existing ticket.
-- Subject choices are resolved server-side using the current user's object-level access; consultants cannot use or discover another consultant's private task, listing, follow-up, or ticket as a subject.
-- Messages are append-only. Multi-recipient tickets use private recipient branches, with per-user unread state, protected attachments, in-app notifications, SLA deadlines, tags, and an audit trail.
-- Ticket attachment downloads go through an authenticated permission-checked endpoint and are not exposed as public media URLs.
-
-After pulling this feature, apply the database migrations before running the server:
-
-```bash
-cd ZaminexB
-python manage.py migrate
-```
-
-## 7. Frontend Build (Only If You Edit React)
+## 6. Frontend Build (Only If You Edit React)
 
 You don't need this to run the project. Bundles are already built and served by Django.
 
@@ -202,7 +184,7 @@ python manage.py runserver
 
 ---
 
-## 8. Run Server
+## 7. Run Server
 
 ```bash
 cd ZaminexB
@@ -212,7 +194,7 @@ Open http://localhost:8000/
 
 ---
 
-## 9. Restore Backup (When Moving Server)
+## 8. Restore Backup (When Moving Server)
 
 ```bash
 psql -U postgres -c "CREATE USER zaminex WITH PASSWORD 'zaminex';"
@@ -224,33 +206,6 @@ cd ZaminexB
 python manage.py migrate
 python manage.py runserver
 ```
-
----
-
-## 10. Redis (Optional — Caching, Phase 2+)
-
-Redis is an **optimisation, never a dependency**:
-
-- **Without** `REDIS_URL` the app runs on in-process LocMem — nothing extra
-  to install, plain checkouts are unchanged.
-- **With** `REDIS_URL` the default cache backend becomes django-redis. The
-  configuration is fail-open (`IGNORE_EXCEPTIONS`): a dead or slow Redis
-  degrades to a cache miss, never to a 500.
-
-```bash
-# Local Redis (optional):
-docker compose up -d redis
-export REDIS_URL=redis://localhost:6379/0
-python manage.py runserver
-```
-
-What uses the cache: DRF's throttle counters (rate limits become accurate
-across workers as soon as Redis is present) and the cache helpers in
-`apps/common/cache_utils.py` (versioned `zaminex:v1:…` keys, JSON payloads
-with exact `Decimal` round-trips, `cache_or_compute` with a per-key lock for
-thundering-herd protection). See `benchmarks/README.md` for the phase plan.
-
----
 
 ## Quick Checklist
 
