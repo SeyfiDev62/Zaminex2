@@ -15,6 +15,7 @@ import { toast } from "../../../shared/lib/utils";
 import { ConfirmModal } from "../../../shared/components/ConfirmModal";
 import { Building2, LayoutDashboard, FileText, CheckSquare, Users, BarChart3, Settings, Bell, Search, LogOut, Plus, ChevronLeft, ChevronDown, ChevronRight, Clock, CheckCircle2, AlertCircle, MoreHorizontal, MapPin, Eye, Edit2, Trash2, Archive, Phone, Mail, Calendar, TrendingUp, Activity, Command, Star, List, LayoutGrid, Download, Shield, User, Lock, Key, RefreshCw, Circle, Zap, Target, Award, Upload, Check, AlertTriangle, Info, XCircle, Loader2, CircleCheck, TriangleAlert, Columns, Send, BellRing, X, ChevronUp, SlidersHorizontal, ArrowUpRight, Layers, MessageSquare, Sparkles, GripVertical, MoreVertical, Building, History, Flame, Image, Filter, SlidersVertical } from "lucide-react";
 import { AttributeCombobox } from "../../../shared/components/ui/AttributeCombobox";
+import { CategoryCombobox } from "../../../shared/components/ui/CategoryCombobox";
 
 // =============================================================================
 //  Base data: custom fields
@@ -133,6 +134,9 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     filterType: "exact",
     isFacility: false,
     searchable: true,
+    // System key of the category the new field is filed under. Empty until the
+    // operator picks one — the server refuses an attribute without a category.
+    category: "",
   });
   const [adding, setAdding] = useState(false);
   // Native window.confirm has no branding and does not match the app; the
@@ -249,7 +253,7 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
   // --- attribute actions --------------------------------------------------
 
   const handleAdd = async () => {
-    if (!form.displayName.trim()) return;
+    if (!form.displayName.trim() || !form.category) return;
     setAdding(true);
     try {
       // «در جستجوها لحاظ شود» maps to the model's filter_type: unchecked
@@ -263,7 +267,7 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
       );
       if (res.ok) {
         toast({ type: "success", message: "ویژگی اضافه شد." });
-        setForm({ displayName: "", dataType: "text", entity: "property", unit: "", filterType: "exact", isFacility: false, searchable: true });
+        setForm({ displayName: "", dataType: "text", entity: "property", unit: "", filterType: "exact", isFacility: false, searchable: true, category: "" });
         // Show the new row the moment the server confirms it — do not rely on
         // the following round trip alone, so the list and the bindings-tab
         // picker update instantly even if the refetch is slow or cached.
@@ -276,7 +280,10 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
         await fetchAttributes();
       } else {
         const data = await res.json().catch(() => null);
-        toast({ type: "error", message: data?.displayName?.[0] || data?.detail || "خطا در افزودن ویژگی" });
+        // `apiErrorMessage` walks the whole payload, so a rejection of the
+        // category («دسته‌بندی انتخاب‌شده وجود ندارد یا حذف شده است.») is read
+        // out instead of being swallowed by the generic fallback.
+        toast({ type: "error", message: apiErrorMessage(data, "خطا در افزودن ویژگی") });
       }
     } catch {
       toast({ type: "error", message: "خطا در ارتباط با سرور" });
@@ -344,6 +351,17 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
       setAddingCategory(false);
     }
   };
+
+  /**
+   * Categories offered when defining a new field. Deactivated ones are left
+   * out: they still have to stay visible in the «دسته‌بندی ویژگی‌ها» tab so an
+   * administrator can switch them back on, but a new field should not be
+   * filed under a group that has been retired.
+   */
+  const selectableCategories = useMemo(
+    () => categories.filter((c) => c.isActive),
+    [categories]
+  );
 
   /** Destinations offered in the move modal: every group but the current one. */
   const moveTargetOptions = useMemo(() => {
@@ -652,7 +670,7 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
           {/* Add new attribute */}
           <Card className="p-5">
             <h3 className="text-sm font-semibold mb-3">افزودن ویژگی جدید</h3>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-3 gap-4">
               <Input label="نام ویژگی" placeholder="مثال: جهت ساختمان" value={form.displayName} onChange={(v) => setForm((p) => ({ ...p, displayName: v }))} />
               <SelectField
                 label="نوع داده"
@@ -664,6 +682,18 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
                   filterType: p.searchable ? defaultFilterType(v) : "none",
                 }))}
                 options={DATA_TYPES}
+              />
+              <CategoryCombobox
+                label="دسته‌بندی"
+                required
+                value={form.category}
+                onChange={(name) => setForm((p) => ({ ...p, category: name }))}
+                categories={selectableCategories}
+                error={
+                  selectableCategories.length === 0
+                    ? "دسته‌بندی فعالی وجود ندارد؛ ابتدا از تب «دسته‌بندی ویژگی‌ها» یک دسته‌بندی بسازید."
+                    : undefined
+                }
               />
             </div>
             <div className="grid grid-cols-3 gap-4 mt-4">
@@ -708,7 +738,7 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
                   <span className="text-sm text-foreground">جزو امکانات رفاهی است</span>
                 </label>
               </div>
-              <Btn variant="primary" onClick={handleAdd} disabled={adding || !form.displayName.trim()}>
+              <Btn variant="primary" onClick={handleAdd} disabled={adding || !form.displayName.trim() || !form.category}>
                 {adding ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
                 افزودن
               </Btn>

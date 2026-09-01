@@ -203,6 +203,64 @@ class AttributeCategoryApiTests(TestCase):
             Attribute.objects.get(pk=created["id"]).category, category["name"]
         )
 
+    def test_creating_an_attribute_counts_towards_its_category(self):
+        """The number shown in the picker is live, not a cached snapshot."""
+        category = self._create_category("ویژگی مالی")
+        self.assertEqual(category["attributeCount"], 0)
+
+        self._create_attribute("قیمت کل", category=category["name"])
+
+        rows = {row["name"]: row for row in self.client.get(ENDPOINT).json()}
+        self.assertEqual(rows[category["name"]]["attributeCount"], 1)
+
+    def test_creating_an_attribute_under_an_unknown_category_is_rejected(self):
+        """The create form cannot be bypassed to file a field nowhere.
+
+        ``Attribute.category`` is a plain system key rather than a foreign key,
+        so without this check a hand-rolled request could store a key no
+        category resolves and the field would vanish from the
+        «دسته‌بندی ویژگی‌ها» screen.
+        """
+        before = Attribute.objects.count()
+        response = self.client.post(
+            "/basics/api/attributes/",
+            {"displayName": "قیمت کل", "dataType": "text", "entity": "property",
+             "category": "no-such-category"},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("وجود ندارد", response.json()["category"][0])
+        self.assertEqual(Attribute.objects.count(), before)
+
+    def test_creating_an_attribute_without_a_category_is_rejected(self):
+        """An explicit empty category is refused rather than silently defaulted.
+
+        Omitting the key entirely still falls back to the model default, which
+        is what API clients that predate categories rely on; sending an empty
+        one means the caller *chose* nothing, which the form guards against and
+        the server confirms.
+        """
+        before = Attribute.objects.count()
+        response = self.client.post(
+            "/basics/api/attributes/",
+            {"displayName": "قیمت کل", "dataType": "text", "entity": "property",
+             "category": "   "},
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["category"][0], "انتخاب دسته‌بندی الزامی است."
+        )
+        self.assertEqual(Attribute.objects.count(), before)
+
+        omitted = self.client.post(
+            "/basics/api/attributes/",
+            {"displayName": "قیمت کل", "dataType": "text", "entity": "property"},
+            content_type="application/json",
+        )
+        self.assertEqual(omitted.status_code, 201, omitted.content[:300])
+        self.assertEqual(omitted.json()["category"], NON_ESSENTIAL)
+
     def test_move_updates_both_categories_counts(self):
         category = self._create_category("ویژگی مالی")
         attribute = self._create_attribute("قیمت کل")

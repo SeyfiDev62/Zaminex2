@@ -249,6 +249,13 @@ class AttributeSerializer(serializers.ModelSerializer):
     # Optional on create: derived from the Persian label, the same way the
     # geography endpoints do it.
     name = serializers.CharField(required=False)
+    # Declared explicitly rather than inherited, so that choosing nothing is
+    # reported in this project's own words by ``validate_category`` instead of
+    # DRF's generic «این مقدار نباید خالی باشد.» — an inherited CharField would
+    # reject the empty string first (``allow_blank=False``) and the message
+    # below would never be reached. Still optional: a caller that omits the key
+    # entirely keeps the model default, which is what pre-dates categories.
+    category = serializers.CharField(allow_blank=True, required=False)
 
     class Meta:
         model = Attribute
