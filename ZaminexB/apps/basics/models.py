@@ -36,6 +36,9 @@ from django.db import models
 
 from apps.common.base_models import ReferenceDataModel, SoftDeleteModel
 
+from .categorization import ESSENTIAL as ESSENTIAL_CATEGORY
+from .categorization import NON_ESSENTIAL as NON_ESSENTIAL_CATEGORY
+
 
 class PropertyUsage(ReferenceDataModel):
     """How a property is used: مسکونی / تجاری / اداری.
@@ -114,6 +117,49 @@ class DealType(ReferenceDataModel):
         ordering = ["sort_order", "display_name"]
 
 
+class AttributeCategory(ReferenceDataModel):
+    """An administrator-defined bucket that attributes are filed under.
+
+    The «دسته‌بندی ویژگی‌ها» screen used to offer exactly two hard-coded
+    groups (ضروری / غیر ضروری). They are now rows an administrator maintains,
+    so a new grouping («امکانات», «مالی», …) needs no deploy.
+
+    ``Attribute.category`` stores this row's ``name`` — the stable system key —
+    rather than a foreign key. That keeps the historical ``essential`` /
+    ``non_essential`` values valid untouched, and keeps
+    :func:`apps.basics.categorization.classify_attribute` a pure function of
+    strings that the data migration and the unit tests can both call.
+
+    Two categories are load-bearing rather than merely conventional:
+    ``essential`` and ``non_essential`` are the values the classification rule
+    emits and ``Attribute.category``'s default. Removing either would leave
+    attributes pointing at a key nothing resolves, so
+    :meth:`is_system_category` marks them and the API refuses to delete them.
+    """
+
+    class Meta(ReferenceDataModel.Meta):
+        abstract = False
+        db_table = "basics_attribute_category"
+        constraints = [ReferenceDataModel.alive_name_unique("attribute_category")]
+        verbose_name = "دسته‌بندی ویژگی"
+        verbose_name_plural = "دسته‌بندی‌های ویژگی"
+        ordering = ["sort_order", "display_name"]
+
+    @property
+    def is_system_category(self) -> bool:
+        """True for the two categories the classification rule depends on."""
+        return self.name in (ESSENTIAL_CATEGORY, NON_ESSENTIAL_CATEGORY)
+
+    def attribute_count(self) -> int:
+        """Attributes currently filed under this category.
+
+        Counts live rows only: a soft-deleted attribute is hidden from the
+        management screen, so it must not silently block removing a group the
+        administrator can see is empty.
+        """
+        return Attribute.objects.filter(category=self.name).count()
+
+
 class Attribute(ReferenceDataModel):
     """A custom field an administrator defines once and reuses everywhere."""
 
@@ -149,10 +195,17 @@ class Attribute(ReferenceDataModel):
         LISTING = "listing", "آگهی"
 
     class Category(models.TextChoices):
-        """Essential ⇔ core or actively bound; the rest are non-essential."""
+        """The two *built-in* categories, seeded by migration 0004.
 
-        ESSENTIAL = "essential", "ویژگی ضروری"
-        NON_ESSENTIAL = "non_essential", "ویژگی غیر ضروری"
+        The full set of categories is administrator-managed — see
+        :class:`AttributeCategory`. These two stay declared here because they
+        are load-bearing: ``essential`` / ``non_essential`` are exactly the
+        values :func:`apps.basics.categorization.classify_attribute` emits and
+        the ones migration 0003 backfilled every historical row with.
+        """
+
+        ESSENTIAL = ESSENTIAL_CATEGORY, "ویژگی ضروری"
+        NON_ESSENTIAL = NON_ESSENTIAL_CATEGORY, "ویژگی غیر ضروری"
 
     data_type = models.CharField(
         max_length=20,
@@ -185,12 +238,25 @@ class Attribute(ReferenceDataModel):
         verbose_name="واحد",
         help_text="مثلاً متر مربع، تومان، عدد.",
     )
+    # Holds the ``name`` (stable system key) of an :class:`AttributeCategory`
+    # row, not a foreign key. See that model's docstring for why.
+    #
+    # ``choices`` is deliberately *not* set: the set of categories is
+    # administrator-managed at runtime, so a static choices list would reject
+    # every category created after this file was written. The value is
+    # validated against the live ``AttributeCategory`` rows instead, in
+    # ``AttributeSerializer.validate_category`` — which is also what makes the
+    # error message name the field the operator actually used.
     category = models.CharField(
-        max_length=20,
-        choices=Category.choices,
+        max_length=100,
         default=Category.NON_ESSENTIAL,
+        db_index=True,
         verbose_name="دسته‌بندی ویژگی",
-        help_text="ضروری ⇔ فیلد ثابت یا دارای حداقل یک اتصال فعال؛ در غیر این صورت غیر ضروری.",
+        help_text=(
+            "دسته‌بندی‌ای که این ویژگی در آن قرار می‌گیرد؛ فهرست دسته‌بندی‌ها از "
+            "تب «دسته‌بندی ویژگی‌ها» مدیریت می‌شود. یک ویژگی همیشه دقیقاً در یک "
+            "دسته‌بندی قرار دارد."
+        ),
     )
     is_facility = models.BooleanField(
         default=False,

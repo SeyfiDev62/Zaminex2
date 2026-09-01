@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 from .models import (
     Attribute,
+    AttributeCategory,
     City,
     District,
     Province,
@@ -42,6 +43,7 @@ from .models import (
 )
 from .serializers import (
     AttributeOptionSerializer,
+    AttributeCategorySerializer,
     CitySerializer,
     DistrictSerializer,
     ProvinceSerializer,
@@ -170,6 +172,64 @@ class DealTypeViewSet(BasicsViewSet):
             .order_by("sort_order")
         )
         return Response(DealTypeAttributeSerializer(links, many=True).data)
+
+
+class AttributeCategoryViewSet(BasicsViewSet):
+    """Categories attributes are filed under («دسته‌بندی ویژگی‌ها»).
+
+    Reading is open to any authenticated user — the attribute management screen
+    needs the list to file each field under its group — while writes stay
+    admin-only, like every other reference-data endpoint.
+    """
+
+    queryset = AttributeCategory.objects.all()
+    serializer_class = AttributeCategorySerializer
+
+    def perform_create(self, serializer):
+        """Append new categories after the existing ones.
+
+        The model orders by ``sort_order`` first, so handing a new row the next
+        free value keeps the two built-in groups at the top and lists
+        user-defined groups in creation order — a stable order the operator can
+        rely on between visits, rather than one that reshuffles as rows are
+        added.
+        """
+        last = AttributeCategory.objects.order_by("-sort_order").values_list(
+            "sort_order", flat=True
+        ).first()
+        serializer.save(sort_order=(last or 0) + 1)
+
+    def perform_destroy(self, instance):
+        """Refuse to remove a category that must stay.
+
+        Two distinct reasons, each with its own message, because the fix the
+        operator has to make is different in each case:
+
+        * **it still contains attributes** — a field always belongs to exactly
+          one category, so the rows have to be moved elsewhere first; the count
+          is included so the message says how much work is left;
+        * **it is one of the two built-in groups** — the classification rule
+          (``apps.basics.categorization``) and ``Attribute.category``'s default
+          both name ``essential`` / ``non_essential``, so deleting either would
+          leave every newly created attribute pointing at a key nothing
+          resolves, silently dropping it from this screen.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        if instance.is_system_category:
+            raise ValidationError(
+                f"«{instance.display_name}» یکی از دسته‌بندی‌های پایهٔ سیستم است و "
+                "حذف آن امکان‌پذیر نیست؛ در صورت عدم نیاز آن را غیرفعال کنید."
+            )
+
+        count = instance.attribute_count()
+        if count:
+            raise ValidationError(
+                f"«{instance.display_name}» شامل {count} ویژگی است؛ ابتدا آن ویژگی‌ها "
+                "را به دسته‌بندی دیگری منتقل کنید تا این دسته‌بندی خالی شود."
+            )
+
+        instance.delete()
 
 
 class AttributeViewSet(BasicsViewSet):

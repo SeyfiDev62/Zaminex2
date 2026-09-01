@@ -8,6 +8,7 @@ from django.contrib import admin
 
 from .models import (
     Attribute,
+    AttributeCategory,
     City,
     District,
     Province,
@@ -100,6 +101,16 @@ class DealTypeAdmin(SoftDeleteAdmin):
     search_fields = ("name", "display_name")
     ordering = ("sort_order",)
     inlines = [DealTypeAttributeInline, DealTypeSearchAttributeInline]
+
+
+@admin.register(AttributeCategory)
+class AttributeCategoryAdmin(SoftDeleteAdmin):
+    list_display = (
+        "display_name", "name", "sort_order", "is_active", "deleted_at",
+    )
+    list_filter = ("is_active",)
+    search_fields = ("name", "display_name")
+    ordering = ("sort_order",)
 
 
 @admin.register(Attribute)

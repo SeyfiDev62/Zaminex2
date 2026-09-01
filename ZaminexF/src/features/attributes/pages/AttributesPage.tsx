@@ -41,7 +41,8 @@ type Attribute = {
   filterType: string;
   entity: "property" | "listing";
   unit: string;
-  category: "essential" | "non_essential";
+  /** System key of the ``AttributeCategory`` this field is filed under. */
+  category: string;
   isFacility: boolean;
   isCore: boolean;
   coreField: string;
@@ -49,6 +50,22 @@ type Attribute = {
   isActive: boolean;
   options: Option[];
   usageCount: number;
+};
+
+/**
+ * A category attributes are filed under (the «دسته‌بندی ویژگی‌ها» tab).
+ *
+ * These used to be two hard-coded groups; they are now rows the administrator
+ * maintains, so the list is fetched rather than declared.
+ */
+type AttributeCategoryRow = {
+  id: number;
+  name: string;
+  displayName: string;
+  isActive: boolean;
+  attributeCount: number;
+  /** One of the two built-in groups, which the server refuses to delete. */
+  isSystem: boolean;
 };
 
 type TypeRow = { id: number; name: string; displayName: string };
@@ -123,6 +140,25 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
   const [pendingDelete, setPendingDelete] = useState<Attribute | null>(null);
   const [pendingUnbind, setPendingUnbind] = useState<Binding | null>(null);
 
+  // --- categories -------------------------------------------------------
+  const [categories, setCategories] = useState<AttributeCategoryRow[]>([]);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [addingCategory, setAddingCategory] = useState(false);
+  // Every group starts collapsed; the set holds the keys of the open ones.
+  const [openCategories, setOpenCategories] = useState<Set<string>>(new Set());
+  // Removing a field from a group is really a move: a field always belongs to
+  // exactly one category, so the modal asks for the destination instead of
+  // deleting anything.
+  const [pendingMove, setPendingMove] = useState<{ attribute: Attribute; from: AttributeCategoryRow } | null>(null);
+  const [moveTarget, setMoveTarget] = useState("");
+  const [moving, setMoving] = useState(false);
+  // Held with its live count so the confirmation can tell the operator why the
+  // server will refuse a non-empty group before they commit to it.
+  const [pendingCategoryDelete, setPendingCategoryDelete] = useState<{
+    category: AttributeCategoryRow;
+    count: number;
+  } | null>(null);
+
   // --- bindings ---------------------------------------------------------
   const [propertyTypes, setPropertyTypes] = useState<TypeRow[]>([]);
   const [dealTypes, setDealTypes] = useState<TypeRow[]>([]);
@@ -163,8 +199,26 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   }, [csrfToken]);
 
+  const fetchCategories = useCallback(async () => {
+    try {
+      // ?all=1 so a deactivated category is still listed here — this is the
+      // management screen, and hiding one would make it impossible to switch
+      // back on. no-store for the same reason as the attribute list: a group
+      // added a moment ago must show up immediately.
+      const res = await apiFetch(
+        "/basics/api/attribute-categories/?all=1",
+        { method: "GET", cache: "no-store" },
+        csrfToken
+      );
+      if (res.ok) setCategories(await res.json());
+    } catch {
+      // Non-fatal: the tab shows its empty state and the add box stays usable.
+    }
+  }, [csrfToken]);
+
   useEffect(() => { fetchAttributes(); }, [fetchAttributes]);
   useEffect(() => { fetchTypes(); }, [fetchTypes]);
+  useEffect(() => { fetchCategories(); }, [fetchCategories]);
 
   // Default to the first type once the catalogue arrives, so the bindings tab
   // is never shown with an empty selector.
@@ -247,27 +301,136 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   };
 
-  const handleMoveCategory = async (row: Attribute, target: "essential" | "non_essential") => {
-    // Optimistic: flip the group immediately so the row jumps without waiting
-    // for the round trip; revert on failure so a rejected move never leaves
-    // the row in the wrong group.
-    setAttributes((prev) => prev.map((a) => (a.id === row.id ? { ...a, category: target } : a)));
+  // --- category handlers -------------------------------------------------
+
+  const toggleCategory = (name: string) => {
+    setOpenCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
+
+  const handleAddCategory = async () => {
+    const displayName = newCategoryName.trim();
+    if (!displayName || addingCategory) return;
+    setAddingCategory(true);
     try {
       const res = await apiFetch(
-        `/basics/api/attributes/${row.id}/`,
-        { method: "PATCH", body: JSON.stringify({ category: target }) },
+        "/basics/api/attribute-categories/",
+        { method: "POST", body: JSON.stringify({ displayName }) },
         csrfToken
       );
+      const data = await readJson(res).catch(() => null);
       if (res.ok) {
-        toast({ type: "success", message: target === "essential" ? "به ویژگی‌های ضروری منتقل شد." : "به ویژگی‌های غیر ضروری منتقل شد." });
-        await fetchAttributes();
+        toast({ type: "success", message: "دسته‌بندی با موفقیت اضافه شد." });
+        setNewCategoryName("");
+        // Open the new group right away so the operator sees it landed, rather
+        // than hunting for it in a list of collapsed headings.
+        if (data?.name) {
+          setOpenCategories((prev) => new Set(prev).add(data.name));
+        }
+        await fetchCategories();
       } else {
-        const data = await res.json().catch(() => null);
-        setAttributes((prev) => prev.map((a) => (a.id === row.id ? { ...a, category: row.category } : a)));
-        toast({ type: "error", message: data?.category?.[0] || data?.detail || "خطا در تغییر دسته‌بندی" });
+        // `apiErrorMessage` walks the whole payload, so a duplicate label
+        // («دسته‌بندی «X» قبلاً ثبت شده است.») reaches the toast instead of a
+        // generic failure.
+        toast({ type: "error", message: apiErrorMessage(data, "خطا در اضافه کردن دسته‌بندی") });
       }
     } catch {
-      setAttributes((prev) => prev.map((a) => (a.id === row.id ? { ...a, category: row.category } : a)));
+      toast({ type: "error", message: "خطا در ارتباط با سرور" });
+    } finally {
+      setAddingCategory(false);
+    }
+  };
+
+  /** Destinations offered in the move modal: every group but the current one. */
+  const moveTargetOptions = useMemo(() => {
+    if (!pendingMove) return [];
+    return categories
+      .filter((c) => c.isActive && c.name !== pendingMove.from.name)
+      .map((c) => ({ label: c.displayName, value: c.name }));
+  }, [categories, pendingMove]);
+
+  const openMoveModal = (attribute: Attribute, from: AttributeCategoryRow) => {
+    setMoveTarget("");
+    setPendingMove({ attribute, from });
+  };
+
+  const confirmMove = async () => {
+    const pending = pendingMove;
+    if (!pending || !moveTarget || moving) return;
+    const targetName =
+      categories.find((c) => c.name === moveTarget)?.displayName ?? moveTarget;
+    setMoving(true);
+    try {
+      const res = await apiFetch(
+        `/basics/api/attributes/${pending.attribute.id}/`,
+        { method: "PATCH", body: JSON.stringify({ category: moveTarget }) },
+        csrfToken
+      );
+      const data = await readJson(res).catch(() => null);
+      if (res.ok) {
+        setPendingMove(null);
+        setMoveTarget("");
+        toast({
+          type: "success",
+          message: `«${pending.attribute.displayName}» به «${targetName}» منتقل شد.`,
+        });
+        // Both lists move: the row leaves one group and appears in the other,
+        // and the two headings' counts change with it.
+        await Promise.all([fetchAttributes(), fetchCategories()]);
+      } else {
+        toast({ type: "error", message: apiErrorMessage(data, "خطا در تغییر دسته‌بندی") });
+      }
+    } catch {
+      toast({ type: "error", message: "خطا در ارتباط با سرور" });
+    } finally {
+      setMoving(false);
+    }
+  };
+
+  const cancelMove = () => {
+    if (moving) return;
+    setPendingMove(null);
+    setMoveTarget("");
+  };
+
+  /**
+   * Remove a whole category.
+   *
+   * The server is the authority on whether it may go: a category still holding
+   * attributes — and the two built-in groups — are refused with a Persian
+   * message that names the reason, which is surfaced verbatim.
+   */
+  const confirmCategoryDelete = async () => {
+    const pending = pendingCategoryDelete;
+    setPendingCategoryDelete(null);
+    if (!pending) return;
+    const { category } = pending;
+    try {
+      const res = await apiFetch(
+        `/basics/api/attribute-categories/${category.id}/`,
+        { method: "DELETE" },
+        csrfToken
+      );
+      if (res.ok || res.status === 204) {
+        toast({ type: "success", message: `دسته‌بندی «${category.displayName}» حذف شد.` });
+        setOpenCategories((prev) => {
+          const next = new Set(prev);
+          next.delete(category.name);
+          return next;
+        });
+        await Promise.all([fetchCategories(), fetchAttributes()]);
+      } else {
+        const data = await readJson(res).catch(() => null);
+        toast({
+          type: "error",
+          message: apiErrorMessage(data, `خطا در حذف دسته‌بندی «${category.displayName}»`),
+        });
+      }
+    } catch {
       toast({ type: "error", message: "خطا در ارتباط با سرور" });
     }
   };
@@ -440,11 +603,17 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
   );
 
   // The «دسته‌بندی ویژگی‌ها» tab renders straight from the shared `attributes`
-  // state (fetched once on mount) — no second fetch. Anything without an
-  // explicit `essential` value falls into the non-essential group, matching the
-  // model default.
-  const essentialAttributes = attributes.filter((a) => a.category === "essential");
-  const nonEssentialAttributes = attributes.filter((a) => a.category !== "essential");
+  // and `categories` state (both fetched once on mount) — no second fetch.
+  // Each group's badge is counted from the same array that renders its rows, so
+  // a heading showing «۰» is guaranteed to expand to an empty list.
+  const categoryGroups = useMemo(
+    () =>
+      categories.map((category) => ({
+        category,
+        items: attributes.filter((a) => a.category === category.name),
+      })),
+    [categories, attributes]
+  );
 
   const currentTypes = bindKind === "property" ? propertyTypes : dealTypes;
 
@@ -771,55 +940,137 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
 
       {tab === "categories" && (
         <div className="space-y-5">
-          {[
-            {
-              key: "essential",
-              title: "ویژگی‌های ضروری",
-              items: essentialAttributes,
-              target: "non_essential" as const,
-              actionLabel: "انتقال به ویژگی‌های غیر ضروری",
-            },
-            {
-              key: "non_essential",
-              title: "ویژگی‌های غیر ضروری",
-              items: nonEssentialAttributes,
-              target: "essential" as const,
-              actionLabel: "انتقال به ویژگی‌های ضروری",
-            },
-          ].map((group) => (
-            <Card key={group.key} className="overflow-hidden">
-              <div className="px-5 py-3.5 border-b border-border bg-secondary/30">
-                <h3 className="text-sm font-semibold">
-                  {group.title} ({group.items.length.toLocaleString("fa-IR")})
-                </h3>
+          {/* Add new category */}
+          <Card className="p-5">
+            <h3 className="text-sm font-semibold mb-3">افزودن دسته‌بندی جدید</h3>
+            <div className="flex gap-3 items-end">
+              <div className="flex-1">
+                <Input
+                  label="نام دسته‌بندی"
+                  placeholder="نام دسته‌بندی را وارد کنید..."
+                  value={newCategoryName}
+                  onChange={setNewCategoryName}
+                />
               </div>
-              {group.items.length === 0 ? (
-                <p className="px-5 py-6 text-center text-xs text-muted-foreground">
-                  هیچ ویژگی‌ای در این دسته نیست.
-                </p>
-              ) : (
-                <div className="divide-y divide-border">
-                  {group.items.map((a) => (
-                    <div key={a.id} className="flex items-center justify-between gap-3 px-5 py-3.5 hover:bg-secondary/20 transition-colors">
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div className={cx("w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0", a.isActive ? "bg-emerald-100 text-emerald-600" : "bg-gray-100 text-gray-400")}>
-                          {a.isFacility ? <Zap size={14} /> : <SlidersHorizontal size={14} />}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className={cx("text-sm font-semibold truncate", !a.isActive && "text-gray-400")}>{a.displayName}</p>
-                          <p className="text-xs text-muted-foreground mt-0.5">{subtitleFor(a)}</p>
-                        </div>
+              <Btn
+                variant="primary"
+                onClick={handleAddCategory}
+                disabled={addingCategory || !newCategoryName.trim()}
+              >
+                {addingCategory ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                افزودن
+              </Btn>
+            </div>
+            <p className="text-xs text-muted-foreground mt-2.5">
+              هر ویژگی همیشه در یک دسته‌بندی قرار دارد؛ دسته‌بندی‌ای که هنوز ویژگی دارد قابل حذف نیست.
+            </p>
+          </Card>
+
+          {/* Category groups — collapsed by default */}
+          {categoryGroups.length === 0 ? (
+            <EmptyState
+              icon={<Layers size={28} />}
+              title="دسته‌بندی‌ای یافت نشد"
+              description="برای شروع، یک دسته‌بندی از فرم بالا اضافه کنید."
+            />
+          ) : (
+            categoryGroups.map(({ category, items }) => {
+              const isOpen = openCategories.has(category.name);
+              return (
+                <Card key={category.id} className="overflow-hidden">
+                  <div
+                    className={cx(
+                      "flex items-center justify-between gap-3 px-5 py-3.5 bg-secondary/30",
+                      isOpen && "border-b border-border"
+                    )}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => toggleCategory(category.name)}
+                      aria-expanded={isOpen}
+                      className="flex items-center gap-2.5 flex-1 min-w-0 text-right cursor-pointer"
+                    >
+                      <span
+                        className={cx(
+                          "w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0 bg-white border transition-colors",
+                          isOpen ? "border-primary/30 text-primary" : "border-border text-muted-foreground"
+                        )}
+                      >
+                        {isOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                      </span>
+                      <span className={cx("text-sm font-semibold truncate", !category.isActive && "text-gray-400")}>
+                        {category.displayName}
+                      </span>
+                      <span
+                        className={cx(
+                          "inline-flex items-center justify-center min-w-[1.6rem] h-5 px-2 rounded-full text-xs font-bold tabular-nums flex-shrink-0",
+                          items.length
+                            ? "bg-primary/10 text-primary"
+                            : "bg-secondary text-muted-foreground"
+                        )}
+                        title={`${items.length.toLocaleString("fa-IR")} ویژگی در این دسته‌بندی`}
+                      >
+                        {items.length.toLocaleString("fa-IR")}
+                      </span>
+                      {!category.isActive && <Badge label="غیرفعال" variant="muted" />}
+                    </button>
+                    <Btn
+                      variant="ghost"
+                      size="xs"
+                      onClick={() => setPendingCategoryDelete({ category, count: items.length })}
+                      className="!text-red-500 hover:!bg-red-50 flex-shrink-0"
+                      title="حذف دسته‌بندی"
+                    >
+                      <Trash2 size={12} />
+                    </Btn>
+                  </div>
+
+                  {isOpen &&
+                    (items.length === 0 ? (
+                      <p className="px-5 py-6 text-center text-xs text-muted-foreground">
+                        هیچ ویژگی‌ای در این دسته نیست.
+                      </p>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {items.map((a) => (
+                          <div
+                            key={a.id}
+                            className="flex items-center justify-between gap-3 px-5 py-3.5 hover:bg-secondary/20 transition-colors"
+                          >
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              <div
+                                className={cx(
+                                  "w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0",
+                                  a.isActive ? "bg-emerald-100 text-emerald-600" : "bg-gray-100 text-gray-400"
+                                )}
+                              >
+                                {a.isFacility ? <Zap size={14} /> : <SlidersHorizontal size={14} />}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <p className={cx("text-sm font-semibold truncate", !a.isActive && "text-gray-400")}>
+                                  {a.displayName}
+                                </p>
+                                <p className="text-xs text-muted-foreground mt-0.5">{subtitleFor(a)}</p>
+                              </div>
+                            </div>
+                            <Btn
+                              variant="ghost"
+                              size="xs"
+                              onClick={() => openMoveModal(a, category)}
+                              className="flex-shrink-0"
+                              title={`حذف از ${category.displayName}`}
+                            >
+                              <XCircle size={12} />
+                              حذف از {category.displayName}
+                            </Btn>
+                          </div>
+                        ))}
                       </div>
-                      <Btn variant="ghost" size="xs" onClick={() => handleMoveCategory(a, group.target)} className="flex-shrink-0">
-                        <ArrowUpRight size={12} />
-                        {group.actionLabel}
-                      </Btn>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </Card>
-          ))}
+                    ))}
+                </Card>
+              );
+            })
+          )}
         </div>
       )}
 
@@ -845,6 +1096,55 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
         onConfirm={confirmUnbind}
         onCancel={() => setPendingUnbind(null)}
       />
+      <ConfirmModal
+        open={pendingCategoryDelete !== null}
+        danger
+        title="حذف دسته‌بندی؟"
+        message={
+          pendingCategoryDelete
+            ? pendingCategoryDelete.count
+              ? `دسته‌بندی «${pendingCategoryDelete.category.displayName}» شامل ${pendingCategoryDelete.count.toLocaleString("fa-IR")} ویژگی است؛ تا وقتی خالی نشود حذف نمی‌شود. ابتدا ویژگی‌های آن را به دسته‌بندی دیگری منتقل کنید.`
+              : `دسته‌بندی «${pendingCategoryDelete.category.displayName}» حذف می‌شود. آیا مطمئن هستید؟`
+            : ""
+        }
+        onConfirm={confirmCategoryDelete}
+        onCancel={() => setPendingCategoryDelete(null)}
+      />
+
+      {/* Move an attribute out of a category.
+          Shaped exactly like ConfirmModal — same overlay, card, icon tile and
+          button row — with one extra field: a feature can never be left
+          without a category, so the destination is part of the same action. */}
+      {pendingMove !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <Card className="w-full max-w-sm p-6 shadow-2xl">
+            <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4 bg-amber-50">
+              <TriangleAlert size={20} className="text-amber-600" />
+            </div>
+            <h3 className="text-base font-semibold mb-1">حذف از دسته‌بندی</h3>
+            <p className="text-sm text-muted-foreground mb-4">
+              «{pendingMove.attribute.displayName}» از دسته‌بندی «{pendingMove.from.displayName}» خارج
+              می‌شود. یک ویژگی نمی‌تواند بدون دسته‌بندی بماند، بنابراین دسته‌بندی مقصد را انتخاب کنید.
+            </p>
+            <SelectField
+              label="دسته‌بندی مقصد"
+              value={moveTarget}
+              onChange={setMoveTarget}
+              options={moveTargetOptions}
+              placeholder="انتخاب دسته‌بندی"
+            />
+            <div className="flex gap-2 justify-end mt-5">
+              <Btn variant="secondary" size="sm" onClick={cancelMove} disabled={moving}>
+                انصراف
+              </Btn>
+              <Btn variant="primary" size="sm" onClick={confirmMove} disabled={moving || !moveTarget}>
+                {moving ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                تایید
+              </Btn>
+            </div>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }
