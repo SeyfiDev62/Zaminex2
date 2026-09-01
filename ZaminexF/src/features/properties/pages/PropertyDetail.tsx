@@ -518,14 +518,24 @@ function PropertyDetail({ navigate, role, property, currentUserId, onArchive, on
         )}
 
         {tab === "گزارش کارشناسی" && property && (
-          <AppraisalReportTab
-            propertyId={String(property.id)}
-            report={(property as any).appraisalReport ?? null}
-            canManage={canManageAppraisal}
-            canDownload={canDownloadAppraisal}
-            onUpload={onUploadAppraisalReport}
-            onDelete={onDeleteAppraisalReport}
-          />
+          !isOwn ? (
+            <div className="max-w-5xl">
+              <EmptyState
+                icon={<Lock size={28} />}
+                title="دسترسی محدود"
+                description="شما به گزارش کارشناسی این ملک دسترسی ندارید"
+              />
+            </div>
+          ) : (
+            <AppraisalReportTab
+              propertyId={String(property.id)}
+              report={(property as any).appraisalReport ?? null}
+              canManage={canManageAppraisal}
+              canDownload={canDownloadAppraisal}
+              onUpload={onUploadAppraisalReport}
+              onDelete={onDeleteAppraisalReport}
+            />
+          )
         )}
 
         {tab === "گزارش" && (

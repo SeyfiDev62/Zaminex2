@@ -87,6 +87,47 @@ source change is required.
 Full Persian report committed at `FINAL_REPORT.md` (14-bug table, change
 inventory, consolidated owner checklist, open-items ledger, rebuild recipe).
 
+## Batch 2 — Stage 2: gate the appraisal section to owners/admins
+
+Carries the **Stage 13 follow-up** ("hide the appraisal section for non-owners
+rather than show a 403 toast"). The «گزارش کارشناسی» tab was rendered
+unconditionally for every viewer; a consultant viewing someone else's
+non-shared property saw the upload/download UI (the download button rendered a
+permission note, and any actual download hit the backend 403).
+
+### Evidence
+
+- `PropertyDetail.tsx` rendered `AppraisalReportTab` for any `tab === "گزارش کارشناسی"`.
+- Sibling restricted tabs (آگهی‌ها, وظایف, پیگیری‌ها) already gate on `!isOwn`
+  with `<EmptyState icon={<Lock/>} title="دسترسی محدود" …/>` — the established
+  pattern in this file.
+- `isOwn` already existed = `role === "admin" || consultantId === currentUserId`
+  (a shared property owned by someone else is NOT own for the viewer).
+- Backend 403 is already in place (defense-in-depth, unchanged):
+  `apps/properties/tests.py::PropertyAppraisalReportApiTests`
+  `test_stranger_cannot_download_non_shared` → 403, `…_upload`/`…_delete` →
+  403/404, `test_shared_property_download_by_any_consultant` → 200.
+
+### Pattern decision
+
+Reuse the existing `EmptyState` «دسترسی محدود» pattern (same as the three
+sibling tabs) rather than removing the tab — keeps the 7-tab row identical
+across roles and content-blocked, matching the file's convention.
+
+### Change (minimal diff, `PropertyDetail.tsx` only)
+
+Wrapped the `AppraisalReportTab` render in `!isOwn ? <EmptyState …/> : <…>`,
+description «شما به گزارش کارشناسی این ملک دسترسی ندارید». No backend change;
+no API URL or field name change.
+
+### Verification
+
+- **Full Django suite: 697/0** (backend unchanged).
+- **vitest: 24/24** — no new test: the FE has no React component-test harness
+  (only the pure-logic `iranLocations.test.ts`), and this is a JSX conditional.
+- **Build:** fresh `npm run build` → `main-BiwVEM53.js` + unchanged
+  `main-DGkrzoh4.css`; bundle committed alongside source.
+
 ## Stage 14 — activity-log status-change entries must be fully Persian
 
 ### Token audit (evidence-first)
