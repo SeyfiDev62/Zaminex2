@@ -4,7 +4,7 @@
 // Leaflet needs a [lat, lng] to fly to when a province / city / district is
 // selected. Provinces and the major cities have a static, always-available
 // reference (no API, no key). Districts and any city not in the table are
-// resolved on the fly via Nominatim (OpenStreetMap's free geocoder) with the
+// resolved on the fly through the app's own geocoding proxy with the
 // province center as a reliable fallback — so the map always lands somewhere
 // sensible even when offline.
 // =============================================================================
@@ -95,34 +95,144 @@ export const DEFAULT_VIEW_CENTER: LatLng = [36.4, 53.2];
 export const DEFAULT_VIEW_ZOOM = 8;
 
 // ---------------------------------------------------------------------------
-//  Nominatim (OSM) geocoding — free, no key
+//  Persian place-name normalisation
 // ---------------------------------------------------------------------------
+//
+// The tables above are keyed by display name, and the names actually selected
+// in the form come from free-text reference data an administrator edits. The
+// same city is routinely spelled several equivalent ways — "خرم‌آباد" with a
+// ZWNJ, "خرم اباد" with a plain space, Arabic ي/ك instead of Persian ی/ک — and
+// a plain object lookup treats those as different keys. The lookup then misses
+// *silently*: no error, just a table that appears not to cover the city.
+//
+// Folding only genuine spelling variants (never letter order) makes the match
+// robust without turning it into a fuzzy search. The server keeps an identical
+// normaliser (apps/common/geocode.py) so a cache key and a table key agree.
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// Letters that are *the same letter* for matching purposes: the Arabic forms of
+// Persian ی/ک, and the alef family — "خرم‌آباد" is written with آ (ALEF WITH
+// MADDA) or with a plain ا depending on who typed it, and both are that city.
+const EQUIVALENT_LETTERS: Record<string, string> = {
+  "\u064a": "\u06cc", // Arabic YEH    → Persian YEH
+  "\u0643": "\u06a9", // Arabic KAF    → Persian KEHEH
+  "\u0629": "\u0647", // TEH MARBUTA   → HEH
+  "\u0649": "\u06cc", // ALEF MAKSURA  → Persian YEH
+  "\u0622": "\u0627", // ALEF W/ MADDA → ALEF
+  "\u0623": "\u0627", // ALEF W/ HAMZA ABOVE → ALEF
+  "\u0625": "\u0627", // ALEF W/ HAMZA BELOW → ALEF
+  "\u0671": "\u0627", // ALEF WASLA    → ALEF
+};
 
-// Nominatim's usage policy allows ~1 request/second. The map picker can fire
-// several resolutions in a row (province → city → district), so every request
-// waits its turn and one 429 is retried once instead of failing the zoom.
-let lastNominatimAt = 0;
+/** ZWNJ / ZWJ / tatweel carry no matching value. */
+const IGNORABLE_CHARACTERS = ["\u200c", "\u200d", "\u0640"];
 
-async function nominatimFetch(url: string): Promise<Response> {
-  const wait = lastNominatimAt + 1100 - Date.now();
-  if (wait > 0) await sleep(wait);
-  lastNominatimAt = Date.now();
-  let res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (res.status === 429) {
-    await sleep(1600);
-    lastNominatimAt = Date.now();
-    res = await fetch(url, { headers: { Accept: "application/json" } });
-  }
-  return res;
+export function normalizePlaceKey(value?: string | null): string {
+  if (!value) return "";
+  let text = value.normalize("NFC");
+  for (const ch of IGNORABLE_CHARACTERS) text = text.split(ch).join("");
+  text = Array.from(text)
+    .filter((c) => !(c >= "\u064b" && c <= "\u0652")) // Arabic diacritics
+    .map((c) => EQUIVALENT_LETTERS[c] ?? c)
+    .join("");
+  // Whitespace carries no identity here, so none of it survives — not even a
+  // plain space. Removing the ZWNJ alone is not enough: the table holds
+  // "خرم‌آباد" (ZWNJ) while operators type "خرم اباد" (space), and a key that
+  // keeps one of the two would silently miss on the other.
+  return text.split(/[\s\u200b-\u200f\u2060\ufeff]/).join("");
 }
 
-/** Coarse bounding box around a known province centre, as Nominatim's
+function normalizeCenters(table: Record<string, LatLng>): Record<string, LatLng> {
+  const out: Record<string, LatLng> = {};
+  for (const [name, center] of Object.entries(table)) {
+    out[normalizePlaceKey(name)] = center;
+  }
+  return out;
+}
+
+const NORMALIZED_PROVINCE_CENTERS = normalizeCenters(IRAN_PROVINCE_CENTERS);
+const NORMALIZED_CITY_CENTERS = normalizeCenters(IRAN_CITY_CENTERS);
+
+/** Centre of a province/city from the static tables, or undefined. */
+function centerFrom(table: Record<string, LatLng>, name: string): LatLng | undefined {
+  const key = normalizePlaceKey(name);
+  return key ? table[key] : undefined;
+}
+
+// ---------------------------------------------------------------------------
+//  Geocoding — through the app's own proxy
+// ---------------------------------------------------------------------------
+//
+// Requests go to ``/common/api/geocode/`` (apps/common/geocode.py) instead of
+// to a public geocoder. Two reasons: the browser is then only ever talking to
+// its own origin, which is what the Content-Security-Policy permits — a direct
+// call was silently blocked and every search reported «نتیجه‌ای یافت نشد» — and
+// the server is where the result gets cached, the upstream gets paced and a
+// descriptive User-Agent gets sent.
+//
+// Pacing and the 429 retry that used to live here moved to the server, where a
+// single budget covers every browser instead of one per tab.
+
+/**
+ * One lookup's outcome, with "the service is down" kept apart from "no match".
+ *
+ * Conflating the two is what made the original bug invisible: a blocked
+ * request reported itself as a place that does not exist, so the operator kept
+ * re-typing an address that was never looked up.
+ */
+type SearchOutcome =
+  | { status: "found"; hit: GeocodeHit }
+  | { status: "not_found" }
+  | { status: "unavailable" };
+
+async function geocodeSearch(
+  query: string,
+  viewbox: string | null,
+  bounded: boolean
+): Promise<SearchOutcome> {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  if (viewbox) {
+    params.set("viewbox", viewbox);
+    if (bounded) params.set("bounded", "1");
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`/common/api/geocode/?${params.toString()}`, {
+      headers: { Accept: "application/json" },
+      credentials: "include",
+    });
+  } catch {
+    // The request never completed — nothing was asked of the geocoder.
+    return { status: "unavailable" };
+  }
+  // The proxy answers 503 when it could not reach its own upstream.
+  if (!res.ok) return { status: "unavailable" };
+
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    return { status: "unavailable" };
+  }
+  if (!Array.isArray(data)) return { status: "unavailable" };
+
+  const row = data[0] as
+    | { lat?: unknown; lon?: unknown; address?: Record<string, string> }
+    | undefined;
+  const lat = Number(row?.lat);
+  const lon = Number(row?.lon);
+  if (!row || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return { status: "not_found" };
+  }
+  return { status: "found", hit: { lat, lon, address: row.address || undefined } };
+}
+
+/** Coarse bounding box around a known province centre, as the geocoder's
  * `viewbox` parameter (west,north,east,south). Widened (halfLat 2.2 /
  * halfLng 3.5) so places near a province edge still rank correctly. */
 function provinceViewbox(provinceName?: string): string | null {
-  const c = provinceName ? IRAN_PROVINCE_CENTERS[provinceName.trim()] : null;
+  const c = provinceName ? centerFrom(NORMALIZED_PROVINCE_CENTERS, provinceName) : null;
   if (!c) return null;
   const [lat, lng] = c;
   const halfLat = 2.2;
@@ -135,45 +245,12 @@ function provinceViewbox(provinceName?: string): string | null {
   ].join(",");
 }
 
-/** A top hit from Nominatim, with its `address` kept for the acceptance rule. */
+/** A geocoder hit, with its `address` kept for the acceptance rule. */
 export type GeocodeHit = {
   lat: number;
   lon: number;
   address?: Record<string, string>;
 };
-
-/** One queued Nominatim request. `bounded` adds `bounded=1` (keep the result
- * inside the viewbox). Returns the top hit or null (offline / not found). */
-async function nominatimSearch(
-  query: string,
-  viewbox: string | null,
-  bounded: boolean
-): Promise<GeocodeHit | null> {
-  try {
-    const url = new URL("https://nominatim.openstreetmap.org/search");
-    url.searchParams.set("q", query);
-    url.searchParams.set("countrycodes", "ir");
-    url.searchParams.set("format", "jsonv2");
-    url.searchParams.set("limit", "1");
-    if (viewbox) {
-      url.searchParams.set("viewbox", viewbox);
-      if (bounded) url.searchParams.set("bounded", "1");
-    }
-    const res = await nominatimFetch(url.toString());
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (Array.isArray(data) && data.length > 0) {
-      const lat = parseFloat(data[0].lat);
-      const lon = parseFloat(data[0].lon);
-      if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
-        return { lat, lon, address: data[0].address || undefined };
-      }
-    }
-  } catch {
-    // offline / blocked → null (caller applies the NO-MOVE fallback)
-  }
-  return null;
-}
 
 /**
  * Ordered query variants for a structured selection (most specific first).
@@ -201,7 +278,7 @@ export function buildQueryVariants(
 }
 
 /** A variant is "fully qualified" when it embeds every selected parent, so
- * Nominatim's own ranking (not `bounded=1`) keeps the result in-province. */
+ * the geocoder's own ranking (not `bounded=1`) keeps the result in-province. */
 export function variantIsFullyQualified(
   variant: string,
   kind: "city" | "district",
@@ -230,30 +307,135 @@ export function acceptsResult(
 ): boolean {
   if (fullyQualified) return true;
   if (!province) return true;
-  const values = Object.values(hit.address || {}).map((v) => String(v).trim());
+  const values = Object.values(hit.address || {})
+    .map((v) => normalizePlaceKey(String(v)))
+    .filter(Boolean);
   if (values.length === 0) return true;
+  const wanted = normalizePlaceKey(province);
   for (const value of values) {
-    for (const other of Object.keys(IRAN_PROVINCE_CENTERS)) {
-      if (other !== province && value === other) return false;
+    for (const other of Object.keys(NORMALIZED_PROVINCE_CENTERS)) {
+      if (other !== wanted && value === other) return false;
     }
   }
   return true;
 }
 
+/** Result of a resolution, so a caller can tell *why* nothing came back. */
+export type ResolveOutcome =
+  | { status: "found"; location: LatLng }
+  | { status: "not_found" }
+  | { status: "unavailable" };
+
+const NOT_FOUND: ResolveOutcome = { status: "not_found" };
+const UNAVAILABLE: ResolveOutcome = { status: "unavailable" };
+
+/** Bounded first (keep the hit inside the province), then unbounded. */
+/** Which pass produced a hit matters: only the bounded one is in-province. */
+type SearchAttempt =
+  | { status: "unavailable" }
+  | { status: "not_found" }
+  | { status: "found"; hit: GeocodeHit; bounded: boolean };
+
+async function searchWithFallback(
+  query: string,
+  viewbox: string | null
+): Promise<SearchAttempt> {
+  if (!viewbox) {
+    const attempt = await geocodeSearch(query, null, false);
+    return attempt.status === "found" ? { ...attempt, bounded: false } : attempt;
+  }
+  const bounded = await geocodeSearch(query, viewbox, true);
+  // A downed geocoder is down for the retry too — fail fast instead of making
+  // the operator wait through a second timeout.
+  if (bounded.status !== "not_found") {
+    return bounded.status === "found" ? { ...bounded, bounded: true } : bounded;
+  }
+  const unbounded = await geocodeSearch(query, viewbox, false);
+  return unbounded.status === "found" ? { ...unbounded, bounded: false } : unbounded;
+}
+
 /**
- * Resolve a place name to coordinates.
+ * Resolve a place name, reporting *why* it failed.
  *
- *  - A **province** uses the static centre table (already exact, no internet);
- *    the geocoder only covers provinces not in the table.
- *  - A **city** / **district** structured selection (`options.variants = true`)
- *    tries an ordered ladder of queries (most specific first) so a repeated
- *    name resolves to its selected parents, and applies the acceptance rule
- *    above. On failure it returns null — the caller must NOT move the camera.
- *  - Free-text search (the picker's search box, `options.variants` omitted)
- *    keeps the single qualified query with the bounded→unbounded fallback and
- *    no acceptance rule (today's behaviour, unchanged).
+ *  - A **province** or a **city** in the static tables resolves offline and
+ *    instantly; only the rest reach the geocoder. ``IRAN_CITY_CENTERS`` used
+ *    to sit unused, so every city — including the 31 largest — paid a network
+ *    round trip and failed outright with no internet.
+ *  - A **city** / **district** structured selection (``options.variants``)
+ *    walks an ordered ladder of queries (most specific first) so a repeated
+ *    name resolves to its selected parents, and applies :func:`acceptsResult`.
+ *  - **Free-text search** (the picker's search box) keeps its single qualified
+ *    query with the bounded→unbounded fallback, and now applies
+ *    :func:`acceptsResult` too — it used to accept the top hit unconditionally,
+ *    so a homonymous neighbourhood in another province could be returned.
+ */
+export async function resolvePlace(
+  name: string,
+  kind: "province" | "city" | "district",
+  context?: { provinceName?: string; cityName?: string },
+  options?: { variants?: boolean }
+): Promise<ResolveOutcome> {
+  const clean = (name || "").trim();
+  if (!clean) return NOT_FOUND;
+
+  const province = context?.provinceName?.trim() || undefined;
+  const city = context?.cityName?.trim() || undefined;
+  const viewbox = provinceViewbox(province);
+
+  // Static tables first: no network, no latency, works offline.
+  if (kind === "province") {
+    const center = centerFrom(NORMALIZED_PROVINCE_CENTERS, clean);
+    if (center) return { status: "found", location: center };
+    const outcome = await geocodeSearch(clean, null, false);
+    if (outcome.status === "unavailable") return UNAVAILABLE;
+    return outcome.status === "found"
+      ? { status: "found", location: [outcome.hit.lat, outcome.hit.lon] }
+      : NOT_FOUND;
+  }
+  if (kind === "city") {
+    const center = centerFrom(NORMALIZED_CITY_CENTERS, clean);
+    if (center) return { status: "found", location: center };
+  }
+
+  if (!options?.variants) {
+    // Free-text search: one qualified query, bounded → unbounded.
+    const parts = [clean];
+    if (kind === "district" && city) parts.push(city);
+    if (province) parts.push(province);
+    const q = parts.join(", ");
+    const qualified = variantIsFullyQualified(q, kind, context);
+    const attempt = await searchWithFallback(q, viewbox);
+    if (attempt.status === "unavailable") return UNAVAILABLE;
+    if (attempt.status !== "found") return NOT_FOUND;
+    // A hit from the bounded pass is inside the province viewbox by
+    // construction, so a fully qualified query may trust the ranker there. The
+    // unbounded retry deliberately drops that constraint — it runs precisely
+    // because nothing matched in-province — so its hit always gets checked.
+    // Without this the search box answered a homonymous neighbourhood in
+    // another province, which is how «گلستان, مازندران» used to land in Tehran.
+    return acceptsResult(attempt.hit, province, qualified && attempt.bounded)
+      ? { status: "found", location: [attempt.hit.lat, attempt.hit.lon] }
+      : NOT_FOUND;
+  }
+
+  // Structured selection: ordered variant ladder + acceptance rule.
+  for (const variant of buildQueryVariants(clean, kind, context)) {
+    const fullyQualified = variantIsFullyQualified(variant, kind, context);
+    const outcome = await geocodeSearch(variant, viewbox, !fullyQualified);
+    if (outcome.status === "unavailable") return UNAVAILABLE;
+    if (outcome.status === "found" && acceptsResult(outcome.hit, province, fullyQualified)) {
+      return { status: "found", location: [outcome.hit.lat, outcome.hit.lon] };
+    }
+  }
+  return NOT_FOUND;
+}
+
+/**
+ * Coordinates only — ``null`` when the place could not be resolved.
  *
- * Returns null when nothing can be resolved.
+ * Kept for callers that only move a camera and do not need to know why nothing
+ * came back; :func:`resolvePlace` is the one that distinguishes a miss from an
+ * unavailable geocoder.
  */
 export async function resolvePlaceCoordinates(
   name: string,
@@ -261,41 +443,6 @@ export async function resolvePlaceCoordinates(
   context?: { provinceName?: string; cityName?: string },
   options?: { variants?: boolean }
 ): Promise<LatLng | null> {
-  const clean = (name || "").trim();
-  if (!clean) return null;
-
-  const province = context?.provinceName?.trim() || undefined;
-  const city = context?.cityName?.trim() || undefined;
-  const viewbox = provinceViewbox(province);
-
-  if (kind === "province") {
-    const c = IRAN_PROVINCE_CENTERS[clean];
-    if (c) return c;
-    const hit = await nominatimSearch(clean, null, false);
-    return hit ? [hit.lat, hit.lon] : null;
-  }
-
-  if (!options?.variants) {
-    // Free-text search: today's single qualified query, bounded → unbounded,
-    // top hit accepted as-is.
-    const parts = [clean];
-    if (kind === "district" && city) parts.push(city);
-    if (province) parts.push(province);
-    const q = parts.join(", ");
-    const hit = viewbox
-      ? (await nominatimSearch(q, viewbox, true)) ??
-        (await nominatimSearch(q, viewbox, false))
-      : await nominatimSearch(q, null, false);
-    return hit ? [hit.lat, hit.lon] : null;
-  }
-
-  // Structured selection: ordered variant ladder + acceptance rule.
-  for (const variant of buildQueryVariants(clean, kind, context)) {
-    const fullyQualified = variantIsFullyQualified(variant, kind, context);
-    const hit = await nominatimSearch(variant, viewbox, !fullyQualified);
-    if (hit && acceptsResult(hit, province, fullyQualified)) {
-      return [hit.lat, hit.lon];
-    }
-  }
-  return null;
+  const outcome = await resolvePlace(name, kind, context, options);
+  return outcome.status === "found" ? outcome.location : null;
 }

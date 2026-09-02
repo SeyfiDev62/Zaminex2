@@ -252,6 +252,44 @@ thundering-herd protection). See `benchmarks/README.md` for the phase plan.
 
 ---
 
+## 11. Map Place Search (Geocoding)
+
+The map picker resolves Persian place names through the app's own endpoint,
+`GET /common/api/geocode/?q=…[&viewbox=w,n,e,s][&bounded=1]`, rather than by
+calling a public geocoder from the browser — the browser only ever talks to
+its own origin, which is what the Content-Security-Policy allows. The upstream
+is called from one place (`apps/common/geocode.py`), which caches the result,
+paces itself to roughly one request per second and sends a descriptive
+`User-Agent`.
+
+Every knob is optional; the defaults work against the public Nominatim:
+
+| Setting | Default | Why you would change it |
+| --- | --- | --- |
+| `GEOCODE_UPSTREAM` | `https://nominatim.openstreetmap.org/search` | Point at a self-hosted Nominatim — this is also what makes a deployment with no internet access possible. |
+| `GEOCODE_USER_AGENT` | `Zaminex-CRM/1.0 (+…)` | The public instance's usage policy requires identifying yourself. |
+| `GEOCODE_TIMEOUT` | `8` (seconds) | A lookup is interactive; a hung upstream must not hold the request. |
+| `GEOCODE_PACING_SECONDS` | `1.1` | `0` disables pacing, which is what a private upstream wants. The budget is global across workers when Redis is present, per-process otherwise. |
+
+```bash
+# Air-gapped or self-hosted geocoder:
+export GEOCODE_UPSTREAM=http://nominatim.internal:8080/search
+export GEOCODE_PACING_SECONDS=0
+```
+
+Coordinates are effectively permanent, so a hit is cached for 30 days and a
+miss for 7 (`GEOCODE_CACHE_TTL` / `GEOCODE_NEGATIVE_CACHE_TTL` in
+`config/settings.py`) — coverage of Iran improves, and a stale "not found"
+should not outlive the fix.
+
+The two failure modes are deliberately distinct, and the UI says so: `200`
+with an empty array means *no such place*, while `503` means *the geocoder
+could not be reached*. Conflating them was the original bug — a blocked
+request reported itself as an address that does not exist, so the operator
+kept re-typing something that was never looked up.
+
+---
+
 ## Quick Checklist
 
 - [ ] PostgreSQL installed, password `zaminex`, PATH set permanently

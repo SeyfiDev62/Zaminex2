@@ -304,6 +304,41 @@ def _cache_settings():
 
 CACHES = _cache_settings()
 
+# ---------------------------------------------------------------------------
+#  Geocoding (map place search)
+# ---------------------------------------------------------------------------
+# The map picker no longer calls a public geocoder from the browser: that was
+# blocked by the app's own Content-Security-Policy and could neither be cached
+# nor rate-limited. Requests now go to /common/api/geocode/ and leave the
+# server from a single place (apps/common/geocode.py).
+#
+# GEOCODE_UPSTREAM is an environment variable rather than a constant so a
+# self-hosted Nominatim can be swapped in with no code change — which is also
+# what makes a deployment with no internet access possible.
+GEOCODE_UPSTREAM = os.environ.get(
+    "GEOCODE_UPSTREAM", "https://nominatim.openstreetmap.org/search"
+).strip()
+# Identify ourselves: the public Nominatim instance's usage policy requires a
+# descriptive User-Agent, and an anonymous client is the first to be throttled.
+GEOCODE_USER_AGENT = os.environ.get(
+    "GEOCODE_USER_AGENT",
+    "Zaminex-CRM/1.0 (+self-hosted real-estate CRM; geocode proxy)",
+).strip()
+# Kept short on purpose: a geocode lookup is interactive, and a hung upstream
+# must not hold a request open the way the AI call (60 s) legitimately does.
+GEOCODE_TIMEOUT = float(os.environ.get("GEOCODE_TIMEOUT", "8"))
+GEOCODE_MAX_QUERY_LENGTH = 200
+GEOCODE_LIMIT = 1
+# The public instance allows ~1 request/second per client. Paced server-side
+# through the shared cache, so the budget is global across workers when Redis
+# is present and per-process otherwise.
+GEOCODE_PACING_SECONDS = float(os.environ.get("GEOCODE_PACING_SECONDS", "1.1"))
+# A place's coordinates are effectively permanent, so a hit is cached for a
+# month; a miss far less, because OpenStreetMap's coverage improves and a
+# stale "not found" must not outlive the fix.
+GEOCODE_CACHE_TTL = 30 * 24 * 3600
+GEOCODE_NEGATIVE_CACHE_TTL = 7 * 24 * 3600
+
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "apps.common.exceptions.persian_exception_handler",
     "DEFAULT_PERMISSION_CLASSES": [
@@ -327,6 +362,9 @@ REST_FRAMEWORK = {
         "ai": "10/hour",
         "export": "10/hour",
         "file_upload": "20/min",
+        # A geocode lookup fans out into up to three upstream calls (the query
+        # ladder), so this is generous for a human but still bounds a runaway.
+        "geocode": "60/min",
     },
 }
 

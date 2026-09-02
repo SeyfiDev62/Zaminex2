@@ -6,7 +6,7 @@ import { Search, Crosshair, MapPin, Check, Loader2 } from "lucide-react";
 import {
   DEFAULT_VIEW_CENTER,
   DEFAULT_VIEW_ZOOM,
-  resolvePlaceCoordinates,
+  resolvePlace,
   type LatLng,
 } from "../../lib/iranLocations";
 import { apiFetch } from "../../lib/apiClient";
@@ -31,6 +31,18 @@ function roundCoord(n: number): number {
 function sameCoord(a: number, b: number): boolean {
   return Math.abs(roundCoord(a) - roundCoord(b)) < 1e-9;
 }
+
+/**
+ * The two ways a place lookup can come back empty, in the operator's words.
+ *
+ * Kept apart on purpose: a miss is an answer («there is no such place»), while
+ * an unavailable geocoder is the absence of one — the operator should not go
+ * hunting for a typo that was never checked.
+ */
+const NOTICE_TEXT = {
+  unavailable: "جستجوی مکان در دسترس نیست؛ اتصال شبکه یا سرویس نقشه را بررسی کنید.",
+  not_found: "نتیجه‌ای یافت نشد",
+} as const;
 
 type LocatedProperty = {
   id: number;
@@ -108,7 +120,10 @@ function PropertyMapPicker({
   const [q, setQ] = useState("");
   const [searching, setSearching] = useState(false);
   const [focusTarget, setFocusTarget] = useState<{ location: LatLng; zoom: number } | null>(null);
-  const [searchNoResult, setSearchNoResult] = useState(false);
+  // A short auto-dismissing notice over the map. Held as text rather than a
+  // boolean because "nothing matched" and "the geocoder is down" need to be
+  // told apart — the first is an answer, the second is not an answer at all.
+  const [mapNotice, setMapNotice] = useState("");
   const noResultTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // On edit the marker is already saved. Do not fly to the district centre on
   // first hydrate — that used to yank the camera off the real marker.
@@ -187,6 +202,12 @@ function PropertyMapPicker({
     };
   }, []);
 
+  const showNotice = useCallback((message: string) => {
+    if (noResultTimer.current) clearTimeout(noResultTimer.current);
+    setMapNotice(message);
+    noResultTimer.current = setTimeout(() => setMapNotice(""), 7000);
+  }, []);
+
   // When a province / city / district changes, resolve and fly there.
   useEffect(() => {
     let cancelled = false;
@@ -205,23 +226,22 @@ function PropertyMapPicker({
         return;
       }
       const kind = districtName ? "district" : cityName ? "city" : "province";
-      const resolved = await resolvePlaceCoordinates(
+      const outcome = await resolvePlace(
         name,
         kind,
         { provinceName, cityName },
         { variants: true }
       );
       if (cancelled) return;
-      if (resolved) {
+      if (outcome.status === "found") {
         const zoom = districtName ? 15 : cityName ? 12 : 8;
-        setFocusTarget({ location: resolved, zoom });
+        setFocusTarget({ location: outcome.location, zoom });
       } else if (kind !== "province") {
-        // NO-MOVE fallback: city/district resolution failed (offline / not
-        // found) — do NOT fly anywhere; show the short auto-dismissing notice
-        // instead. Province still zooms from the static table (no internet).
-        if (noResultTimer.current) clearTimeout(noResultTimer.current);
-        setSearchNoResult(true);
-        noResultTimer.current = setTimeout(() => setSearchNoResult(false), 7000);
+        // NO-MOVE fallback: a city or district that could not be resolved must
+        // not drag the camera somewhere arbitrary. Provinces and the 31 cities
+        // in the static table always resolve offline, so in practice this is a
+        // district (or an unlisted city) with the geocoder out of reach.
+        showNotice(NOTICE_TEXT[outcome.status]);
       }
     };
     run();
@@ -250,7 +270,7 @@ function PropertyMapPicker({
   const handleSearch = async () => {
     if (!q.trim()) return;
     if (noResultTimer.current) clearTimeout(noResultTimer.current);
-    setSearchNoResult(false);
+    setMapNotice("");
     setSearching(true);
     try {
       // Scope the search with the selected city/province: a neighbourhood
@@ -258,17 +278,15 @@ function PropertyMapPicker({
       // selected context is what makes it resolve the exact one. A place
       // outside the province still resolves — the bounded search simply
       // falls back to the unbounded one.
-      const resolved = await resolvePlaceCoordinates(q.trim(), "district", {
+      const outcome = await resolvePlace(q.trim(), "district", {
         provinceName,
         cityName,
       });
-      if (resolved) {
-        setFocusTarget({ location: resolved, zoom: 15 });
+      if (outcome.status === "found") {
+        setFocusTarget({ location: outcome.location, zoom: 15 });
         setQ("");
       } else {
-        // No match found: show a short notice over the map, then auto-dismiss.
-        setSearchNoResult(true);
-        noResultTimer.current = setTimeout(() => setSearchNoResult(false), 7000);
+        showNotice(NOTICE_TEXT[outcome.status]);
       }
     } finally {
       setSearching(false);
@@ -381,10 +399,10 @@ function PropertyMapPicker({
             تایید موقعیت ملک
           </button>
         )}
-        {searchNoResult && (
+        {mapNotice && (
           <div className="absolute inset-0 z-[1001] flex items-center justify-center pointer-events-none">
             <div className="bg-white/95 backdrop-blur rounded-lg px-3 py-1.5 text-xs text-destructive shadow-sm border border-border">
-              نتیجه‌ای یافت نشد
+              {mapNotice}
             </div>
           </div>
         )}
