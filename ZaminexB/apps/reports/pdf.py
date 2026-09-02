@@ -39,7 +39,7 @@ from reportlab.graphics import renderPDF
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
@@ -219,16 +219,20 @@ def _register_font() -> None:
 # ---------------------------------------------------------------------------
 
 def _styles() -> dict:
-    base = dict(fontName=FONT_NAME, wordWrap="RTL")
+    # Persian reads right-to-left, so every paragraph — titles, section heads,
+    # label/value cells and table cells alike — is right-aligned. ``wordWrap``
+    # alone only controls wrapping; the explicit ``alignment`` is what actually
+    # pins the text to the right edge.
+    base = dict(fontName=FONT_NAME, wordWrap="RTL", alignment=TA_RIGHT)
     return {
         "title": ParagraphStyle("title", leading=20, **base, fontSize=15, textColor=colors.HexColor("#0F172A")),
         "subtitle": ParagraphStyle("subtitle", leading=14, **base, fontSize=10, textColor=colors.HexColor("#475569")),
         "meta": ParagraphStyle("meta", leading=12, **base, fontSize=8.5, textColor=colors.HexColor("#64748B")),
         "section": ParagraphStyle("section", leading=16, **base, fontSize=11.5, textColor=colors.HexColor("#0F172A")),
         "cell": ParagraphStyle("cell", leading=11, **base, fontSize=8),
-        "cellCenter": ParagraphStyle("cellCenter", leading=11, **base, fontSize=8, alignment=TA_CENTER),
+        "cellCenter": ParagraphStyle("cellCenter", leading=11, **base, fontSize=8),
         "cellLabel": ParagraphStyle("cellLabel", leading=11, **base, fontSize=8, textColor=colors.HexColor("#475569")),
-        "empty": ParagraphStyle("empty", leading=12, **base, fontSize=8.5, textColor=colors.HexColor("#94A3B8"), alignment=TA_CENTER),
+        "empty": ParagraphStyle("empty", leading=12, **base, fontSize=8.5, textColor=colors.HexColor("#94A3B8")),
     }
 
 
@@ -591,6 +595,7 @@ def _table_style(n_rows: int) -> TableStyle:
         [
             ("FONTNAME", (0, 0), (-1, -1), FONT_NAME),
             ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
             ("GRID", (0, 0), (-1, -1), 0.25, GRID_COLOR),
             ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -607,8 +612,14 @@ def _header_and_footer(canvas, doc) -> None:
     canvas.saveState()
     canvas.setFont(FONT_NAME, 7.5)
     canvas.setFillColor(colors.HexColor("#94A3B8"))
-    canvas.drawRightString(doc.pagesize[0] - doc.rightMargin, 8 * mm, f"صفحه {fa_number(doc.page)}")
-    canvas.drawString(doc.leftMargin, 8 * mm, "ساخته‌شده توسط CRM زمینکس")
+    # The two strings are Persian, so they must go through the same reshape +
+    # bidi pass as the body — raw Arabic-script text handed to the canvas comes
+    # out as disconnected, out-of-order fragments (the "بهم‌ریخته" bug). The
+    # brand sits on the right and the page number on the left: an RTL mirror.
+    canvas.drawRightString(
+        doc.pagesize[0] - doc.rightMargin, 8 * mm, t("ساخته‌شده توسط CRM زمینکس")
+    )
+    canvas.drawString(doc.leftMargin, 8 * mm, t(f"صفحه {fa_number(doc.page)}"))
     canvas.setStrokeColor(GRID_COLOR)
     canvas.setLineWidth(0.4)
     canvas.line(doc.leftMargin, 11 * mm, doc.pagesize[0] - doc.rightMargin, 11 * mm)

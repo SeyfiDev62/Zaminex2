@@ -320,3 +320,33 @@ export function ownerPhoneError(raw: string | number | null | undefined): string
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+//  Client-side file download (CSV / PDF exports, ticket exports)
+// ---------------------------------------------------------------------------
+
+/**
+ * Save an in-memory Blob as a file, the race-free way.
+ *
+ * The object URL must outlive the browser's hand-off of the download. The old
+ * pattern called `URL.revokeObjectURL` synchronously right after `a.click()`,
+ * so on larger payloads (the PDF report) the browser started reading an
+ * already-revoked URL and saved a 0-byte file — "Failed to load PDF document".
+ *
+ * Teardown is therefore deferred to a later macrotask: the click queues the
+ * download, and only afterwards do we release the URL and drop the anchor.
+ * Firefox also requires the anchor to be attached to the document for the
+ * `download` attribute to be honoured, so it is appended first.
+ */
+export function saveBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+    anchor.remove();
+  }, 0);
+}
