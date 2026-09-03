@@ -417,10 +417,10 @@ REST_FRAMEWORK = {
         "apps.common.throttles.ResilientScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
-        # These two apply to every DRF view, because DEFAULT_THROTTLE_CLASSES
-        # includes AnonRateThrottle and UserRateThrottle and a view that does
-        # not declare its own throttle_classes inherits them. So an endpoint
-        # with no explicit scope is not unthrottled — it is covered here.
+        # These two apply to every DRF view: DEFAULT_THROTTLE_CLASSES above
+        # contains the anon and user limiters, and a view that does not
+        # declare its own throttle_classes inherits them. So an endpoint with
+        # no explicit scope is not unthrottled — it is covered here.
         "anon": "60/min",
         "user": "300/min",
         # Tighter per-endpoint scopes. Each one is only in force on a view

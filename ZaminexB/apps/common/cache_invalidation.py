@@ -123,7 +123,6 @@ def invalidate_property_caches(prop) -> None:
     _invalidate_users({consultant_id})
 
 
-
 def register() -> None:
     """Connect the receivers (idempotent). Called from CommonConfig.ready()."""
     from apps.followups.models import FollowUp

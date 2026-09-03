@@ -328,11 +328,14 @@ def cache_add(key: str, value: Any, timeout: int | float | None) -> bool | None:
     The three-way result is also what makes this the right primitive for
     both the per-key compute lock and the geocoder's rate window: they need
     the same atomicity, and a read-then-write race is what this replaces.
+
+    The value is encoded exactly as :func:`cache_set` encodes it, so a value
+    stored with ``cache_add`` reads back correctly through :func:`cache_get`.
     """
     if not cache_backend_available():
         return None
     try:
-        acquired = _cache().add(key, "1", timeout)
+        acquired = _cache().add(key, _encode(value), timeout)
     except Exception:
         acquired = None
     # ``add`` returning ``False`` means the backend *answered* (the key was

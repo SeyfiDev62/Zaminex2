@@ -437,6 +437,23 @@ class CacheAddTests(TestCase):
         self.assertTrue(cache_utils.cache_add(key, 1, 30))
         self.assertFalse(cache_utils.cache_add(key, 1, 30))
 
+    def test_the_value_is_stored_and_reads_back_through_cache_get(self):
+        """Guards the composition: cache_add encodes like cache_set, so a
+        value written atomically is readable through the normal helper. A
+        placeholder written instead of the argument would pass every
+        lock/pacing test and silently corrupt any real payload."""
+        key = make_key("test", "add-value")
+        cache_delete(key)
+        self.assertTrue(cache_utils.cache_add(key, {"payload": 7}, 30))
+        self.assertEqual(cache_get(key), {"payload": 7})
+
+    def test_a_second_call_does_not_overwrite_the_first_value(self):
+        key = make_key("test", "add-keeps-first")
+        cache_delete(key)
+        self.assertTrue(cache_utils.cache_add(key, "first", 30))
+        self.assertFalse(cache_utils.cache_add(key, "second", 30))
+        self.assertEqual(cache_get(key), "first")
+
     def test_a_swallowed_error_returns_none_not_false(self):
         class _Swallowing:
             def add(self, *args, **kwargs):

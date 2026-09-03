@@ -45,13 +45,16 @@ class _SessionCacheGuard:
         self._wrapped = wrapped
 
     def __getattr__(self, name: str) -> Any:
+        # Reaching ``_wrapped`` through here would recurse forever before
+        # ``__init__`` has assigned it (unpickling, copy, some repr helpers).
+        if name == "_wrapped":
+            raise AttributeError(name)
         return getattr(self._wrapped, name)
 
     def get(self, key: str, default: Any = None, version: Any = None) -> Any:
         if not cache_utils.cache_backend_available():
             return default
-        delivered = self._wrapped.get(key, default, version)
-        return delivered
+        return self._wrapped.get(key, default, version)
 
     def set(self, key: str, value: Any, timeout: Any = None, version: Any = None) -> Any:
         if not cache_utils.cache_backend_available():
