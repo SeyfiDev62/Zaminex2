@@ -329,9 +329,17 @@ def _cache_settings():
                     # open must not also mean failing silently.
                     "IGNORE_EXCEPTIONS": True,
                     # A hung Redis must not stall requests: bound the connect
-                    # and read windows tightly.
-                    "SOCKET_CONNECT_TIMEOUT": 0.5,
-                    "SOCKET_TIMEOUT": 0.5,
+                    # and read windows tightly. The cost is per operation, not
+                    # per request — a warm request makes 5 cache round trips
+                    # and a cold one up to 9 — so this value is the multiplier
+                    # on the worst case. Measured against a Redis that accepts
+                    # the connection and never replies:
+                    #     0.5s → 4,529 ms per cold request
+                    #     0.1s →   928 ms per cold request
+                    # Local Redis answers in well under a millisecond, so
+                    # 0.1s is ~100x headroom and still fails fast.
+                    "SOCKET_CONNECT_TIMEOUT": 0.1,
+                    "SOCKET_TIMEOUT": 0.1,
                 },
             }
         }
@@ -460,7 +468,16 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 #     degrades transparently to the plain DB engine — no 500s on login,
 #     requests or logout (the store also wraps its own cache calls).
 # No migration: cached_db uses the same django_session table.
-SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+#
+# The subclass adds one thing: it skips the cache while cache_utils has
+# marked the backend down. Fail-open already made an outage *correct* here,
+# but not *cheap* — with SESSION_SAVE_EVERY_REQUEST on, every authenticated
+# request still paid two socket timeouts on a hung Redis. Skipping them
+# degrades to the plain DB engine immediately instead. See
+# apps/common/session_backend.py.
+# SESSION_ENGINE names the *module* — Django imports it and uses its
+# ``SessionStore`` attribute, the same contract the stock engines follow.
+SESSION_ENGINE = "apps.common.session_backend"
 # CSRF cookie must be readable by JS to set the X-CSRFToken header from the
 # SPA; keep it scoped to the same site and HttpOnly off (this is standard
 # for a session-authenticated SPA).

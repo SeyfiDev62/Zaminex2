@@ -9,6 +9,7 @@ port to prove the roadmap's acceptance criterion end to end:
 **a dead Redis → the request still succeeds.**
 """
 
+import logging
 import os
 import threading
 import time
@@ -289,3 +290,137 @@ class CacheSettingsTests(TestCase):
             caches["default"]["BACKEND"],
             "django.core.cache.backends.locmem.LocMemCache",
         )
+
+
+class _CountingCache:
+    """A cache double that counts the operations that actually reach it."""
+
+    def __init__(self, healthy=True):
+        self.healthy = healthy
+        self.store = {}
+        self.ops = 0
+
+    def get(self, key, default=None, version=None):
+        self.ops += 1
+        return self.store.get(key, default) if self.healthy else default
+
+    def set(self, key, value, timeout=None, version=None):
+        self.ops += 1
+        if not self.healthy:
+            return None  # what django-redis returns when it swallowed an error
+        self.store[key] = value
+        return True
+
+    def add(self, key, value, timeout=None, version=None):
+        self.ops += 1
+        if not self.healthy:
+            return None
+        if key in self.store:
+            return False
+        self.store[key] = value
+        return True
+
+    def delete(self, key, version=None):
+        self.ops += 1
+        self.store.pop(key, None)
+
+
+class CircuitBreakerTests(TestCase):
+    """A marked-down backend must cost nothing, not a timeout per operation.
+
+    Fail-open already turns a failure into a miss, but a *hung* backend
+    charges ``SOCKET_TIMEOUT`` on every operation and a single request makes
+    up to nine of them — measured at 4,529 ms per cold request with the
+    previous 0.5 s setting. Skipping the doomed call is what makes the
+    degraded path cheap.
+
+    Runs against ``REDIS_CACHES`` so the availability tracking is armed;
+    under LocMem a ``None`` from ``set`` means success and the breaker
+    (correctly) never opens.
+    """
+
+    REDIS_CACHES = {"default": {"BACKEND": "django_redis.cache.RedisCache"}}
+
+    def setUp(self):
+        cache_utils.reset_backend_availability()
+        logging.getLogger("apps.common.cache_utils").setLevel(logging.CRITICAL)
+
+    def tearDown(self):
+        cache_utils.reset_backend_availability()
+        logging.getLogger("apps.common.cache_utils").setLevel(logging.NOTSET)
+
+    def test_a_swallowed_write_opens_the_breaker(self):
+        fake = _CountingCache(healthy=False)
+        with override_settings(CACHES=self.REDIS_CACHES), mock.patch.object(
+            cache_utils, "_cache", return_value=fake
+        ):
+            self.assertTrue(cache_utils.cache_backend_available())
+            cache_set(make_key("test", "cb"), {"x": 1}, 30)
+            self.assertFalse(cache_utils.cache_backend_available())
+
+    def test_helpers_bypass_a_marked_down_backend(self):
+        key = make_key("test", "cb-bypass")
+        fake = _CountingCache(healthy=False)
+        with override_settings(CACHES=self.REDIS_CACHES), mock.patch.object(
+            cache_utils, "_cache", return_value=fake
+        ):
+            cache_set(key, {"x": 1}, 30)  # opens the breaker
+            ops = fake.ops
+            for _ in range(10):
+                self.assertIsNone(cache_get(key))
+                self.assertFalse(cache_set(key, {"x": 1}, 30))
+                cache_delete(key)
+            self.assertEqual(fake.ops, ops, "no operation may reach a down backend")
+
+    def test_locks_are_skipped_while_down(self):
+        key = make_key("test", "cb-lock")
+        fake = _CountingCache(healthy=False)
+        with override_settings(CACHES=self.REDIS_CACHES), mock.patch.object(
+            cache_utils, "_cache", return_value=fake
+        ):
+            cache_set(key, {"x": 1}, 30)  # opens the breaker
+            ops = fake.ops
+            calls = []
+
+            def compute():
+                calls.append(1)
+                return {"ok": True}
+
+            self.assertEqual(cache_or_compute(key, compute, 60), {"ok": True})
+            with cache_utils.with_lock(key):
+                pass
+            self.assertEqual(fake.ops, ops, "no lock round trip may be attempted")
+            self.assertEqual(calls, [1], "compute still runs — the lock is an optimisation")
+
+    def test_a_healthy_backend_is_always_used(self):
+        key = make_key("test", "cb-healthy")
+        fake = _CountingCache(healthy=True)
+        with override_settings(CACHES=self.REDIS_CACHES), mock.patch.object(
+            cache_utils, "_cache", return_value=fake
+        ):
+            cache_set(key, {"x": 1}, 30)
+            self.assertEqual(cache_get(key), {"x": 1})
+            self.assertTrue(fake.ops >= 2)
+            self.assertTrue(cache_utils.cache_backend_available())
+
+    def test_state_is_dropped_when_the_backend_changes(self):
+        """A failure recorded against one backend says nothing about another.
+
+        Guards against a django-redis outage leaking into a later LocMem
+        request in the same process — which is exactly what ``override_settings``
+        does between tests.
+        """
+        fake = _CountingCache(healthy=False)
+        with override_settings(CACHES=self.REDIS_CACHES), mock.patch.object(
+            cache_utils, "_cache", return_value=fake
+        ):
+            cache_set(make_key("test", "cb-swap"), {"x": 1}, 30)
+            self.assertFalse(cache_utils.cache_backend_available())
+
+        locmem = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+        with override_settings(CACHES=locmem):
+            self.assertTrue(cache_utils.cache_backend_available())
+            self.assertFalse(cache_utils.backend_reports_delivery())
+            key = make_key("test", "cb-swap-locmem")
+            cache_set(key, {"x": 1}, 30)
+            self.assertEqual(cache_get(key), {"x": 1}, "LocMem must not be starved")
