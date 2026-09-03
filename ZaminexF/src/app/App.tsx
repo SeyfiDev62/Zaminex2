@@ -941,10 +941,35 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
   }, [initialData.csrfToken]);
 
   // The list tabs (properties / my-properties / all-properties) paginate on
-  // the server themselves; this fetch serves the pages that still need the
-  // full visible list for comboboxes (wizards, follow-ups, filters).
+  // the server themselves; this fetch serves every page that still needs the
+  // full visible list client-side — the property comboboxes (add-listing /
+  // follow-up wizards, the listings filter, the tasks board) and the admin
+  // dashboard's property sections. Before this, only a handful of pages ever
+  // triggered the fetch, so the same components on every other page rendered
+  // against an empty array and showed no properties at all.
+  //
+  // Access is untouched: fetchProperties hits the role-scoped list endpoint
+  // (admin sees everything, a consultant sees own + shared) and never sends
+  // scope=all, so a consultant's comboboxes only ever offer what they may see.
   useEffect(() => {
-    if (page !== "add-property" && page !== "edit-property" && page !== "create-followup" && page !== "edit-followup" && page !== "follow-ups") return;
+    const needsVisibleProperties = new Set([
+      "admin-dashboard",
+      "properties",
+      "add-property",
+      "edit-property",
+      "listings",
+      "my-listings",
+      "create-listing",
+      "edit-listing",
+      "tasks-kanban",
+      "create-task",
+      "tasks-calendar",
+      "follow-ups",
+      "my-followups",
+      "create-followup",
+      "edit-followup",
+    ]);
+    if (!needsVisibleProperties.has(page)) return;
     fetchProperties();
   }, [page, fetchProperties]);
 
@@ -1450,7 +1475,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
   const renderPage = () => {
     switch (page) {
       case "admin-dashboard":
-        return <AdminDashboard kpis={dashboardKpis} navigate={navigate} onRefresh={refreshDashboard} topConsultants={topConsultants} recentActivities={recentActivities} tasks={tasks} upcomingFollowups={upcomingFollowups} revenueMonthly={revenueMonthly} revenueDealTypes={revenueDealTypes} propertyComposition={propertyComposition} hotProperties={hotProperties} located={locatedProperties} onSaveTask={saveTask} onDeleteTask={deleteTask} />;
+        return <AdminDashboard kpis={dashboardKpis} navigate={navigate} onRefresh={refreshDashboard} topConsultants={topConsultants} recentActivities={recentActivities} tasks={tasks} upcomingFollowups={upcomingFollowups} revenueMonthly={revenueMonthly} revenueDealTypes={revenueDealTypes} propertyComposition={propertyComposition} hotProperties={hotProperties} located={locatedProperties} properties={properties} onSaveTask={saveTask} onDeleteTask={deleteTask} />;
       case "properties":
         return (
           <PropertiesPage
