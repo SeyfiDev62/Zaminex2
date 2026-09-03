@@ -40,6 +40,7 @@ __all__ = [
     "cache_get",
     "cache_set",
     "cache_delete",
+    "cache_add",
     "cache_or_compute",
     "with_lock",
     "backend_reports_delivery",
@@ -307,6 +308,39 @@ def cache_delete(key: str) -> None:
         pass
 
 
+def cache_add(key: str, value: Any, timeout: int | float | None) -> bool | None:
+    """Atomic set-if-absent (``SET NX EX`` via ``cache.add``), fail-open.
+
+    Three outcomes, and callers must handle all three:
+
+    * ``True``  — the key did not exist; we created it, so we won.
+    * ``False`` — the key already existed; somebody else won.
+    * ``None``  — **unknown**: the backend is down or ``IGNORE_EXCEPTIONS``
+      swallowed an error, so nobody knows who won.
+
+    ``None`` is the trap. django-redis's ``add`` is decorated with
+    ``@omit_exception`` (``return_value=None``), so a dead backend returns
+    ``None``, not ``False`` — testing ``if not cache_add(...)`` would treat
+    an outage as "someone else holds it" and make every caller wait out its
+    full deadline. Callers that use this as a one-per-window gate must test
+    ``is not False`` and fail open.
+
+    The three-way result is also what makes this the right primitive for
+    both the per-key compute lock and the geocoder's rate window: they need
+    the same atomicity, and a read-then-write race is what this replaces.
+    """
+    if not cache_backend_available():
+        return None
+    try:
+        acquired = _cache().add(key, "1", timeout)
+    except Exception:
+        acquired = None
+    # ``add`` returning ``False`` means the backend *answered* (the key was
+    # already there); only ``None`` means the failure was swallowed.
+    note_cache_delivered(acquired is not None)
+    return acquired
+
+
 def cache_or_compute(
     key: str,
     compute: Callable[[], Any],
@@ -344,7 +378,7 @@ def cache_or_compute(
         return value
 
     lock_key = key + _LOCK_SUFFIX
-    won = _try_acquire(lock_key, _LOCK_TIMEOUT)
+    won = cache_add(lock_key, "1", _LOCK_TIMEOUT)
 
     if won is False:
         deadline = time.monotonic() + _LOCK_MAX_WAIT
@@ -361,26 +395,6 @@ def cache_or_compute(
     if won:
         cache_delete(lock_key)
     return value
-
-
-def _try_acquire(key: str, timeout: int | float) -> bool | None:
-    """``SET NX EX`` via ``cache.add``, fail-open.
-
-    ``True`` = we hold the lock, ``False`` = someone else does, ``None`` =
-    unknown (the backend is down or swallowed an error) → the caller
-    proceeds uncoordinated, which is always safe: the lock is a dedup
-    optimisation, never a correctness gate.
-    """
-    if not cache_backend_available():
-        return None
-    try:
-        acquired = _cache().add(key, "1", timeout)
-    except Exception:
-        acquired = None
-    # ``add`` returning ``False`` means the backend *answered* (the key was
-    # already there); only ``None`` means the failure was swallowed.
-    note_cache_delivered(acquired is not None)
-    return acquired
 
 
 def _lock_gone(key: str) -> bool:
@@ -421,7 +435,7 @@ def with_lock(
     ``wait`` bounds how long a waiter blocks before proceeding in parallel
     (graceful degradation: an extra computation, never a stalled request).
     """
-    acquired = _try_acquire(key, timeout)
+    acquired = cache_add(key, "1", timeout)
     owned = acquired is True
     if acquired is False:
         deadline = time.monotonic() + wait

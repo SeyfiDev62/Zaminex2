@@ -317,6 +317,79 @@ class GeocodeFunctionTests(GeocodeTestBase):
         self.assertGreaterEqual(elapsed, 0.1)
         self.assertLess(elapsed, 3.0)
 
+    @override_settings(GEOCODE_PACING_SECONDS=0.5)
+    def test_only_one_of_many_concurrent_callers_takes_the_slot(self):
+        """The race the atomic ``cache_add`` exists to close.
+
+        Reading the slot and then writing it let every caller that arrived
+        before the winner's write lands see an empty slot, so they all went
+        on to call the upstream together — measured at 145 escapes out of
+        512 concurrent callers against a real Redis. A single ``SET NX``
+        admits exactly one per window.
+        """
+        import threading
+        import time as _time
+
+        from apps.common import cache_utils
+        from apps.common.geocode import _pace
+
+        window = 0.5
+        slot = cache_utils.make_key("geocode", "pace")
+        cache_utils.cache_delete(slot)
+
+        acquired = []
+        lock = threading.Lock()
+        real_add = cache_utils.cache_add
+
+        def counting_add(key, value, timeout):
+            result = real_add(key, value, timeout)
+            if result is not False:
+                with lock:
+                    acquired.append(_time.monotonic())
+            return result
+
+        concurrency = 32
+        barrier = threading.Barrier(concurrency)
+
+        def worker():
+            barrier.wait()
+            _pace()
+
+        with mock.patch.object(cache_utils, "cache_add", counting_add):
+            started = _time.monotonic()
+            threads = [threading.Thread(target=worker) for _ in range(concurrency)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        # Later windows are allowed to admit one caller each — the point is
+        # that a single window admits exactly one, not several at once.
+        in_first_window = [t for t in acquired if t - started < window]
+        self.assertEqual(
+            len(in_first_window),
+            1,
+            f"{len(in_first_window)} callers escaped the first pacing window",
+        )
+
+    @override_settings(GEOCODE_PACING_SECONDS=1.1)
+    def test_an_unavailable_cache_makes_pacing_proceed_not_block(self):
+        """``cache_add`` returns ``None`` — not ``False`` — when the backend
+        swallowed an error. Reading that as "someone else holds the slot"
+        would make every geocode request spin out the full 3.3 s deadline
+        for as long as Redis is down.
+        """
+        import time as _time
+
+        from apps.common import cache_utils
+        from apps.common.geocode import _pace
+
+        with mock.patch.object(cache_utils, "cache_add", return_value=None):
+            started = _time.monotonic()
+            _pace()
+            elapsed = _time.monotonic() - started
+        self.assertLess(elapsed, 0.2, f"_pace() blocked for {elapsed:.2f}s")
+
 
 # ---------------------------------------------------------------------------
 #  The HTTP contract

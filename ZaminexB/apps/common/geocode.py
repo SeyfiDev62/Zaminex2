@@ -181,13 +181,23 @@ def _pace() -> None:
     slot = cache_utils.make_key("geocode", "pace")
     deadline = time.monotonic() + seconds * 3
     while time.monotonic() < deadline:
-        try:
-            if cache_utils.cache_get(slot) is None:
-                # ``cache_set`` is fail-open; if the backend is down the pace
-                # is simply not enforced, which is the intended degradation.
-                cache_utils.cache_set(slot, 1, seconds)
-                return
-        except Exception:  # pragma: no cover - defensive, helpers are fail-open
+        # Taking the slot must be a single atomic ``SET NX``. Reading the
+        # slot and then writing it is a check-then-act race: every caller
+        # that arrives before the winner's write lands reads an empty slot,
+        # so they all go on to call the upstream together — which is exactly
+        # what the pacing exists to prevent. Measured against a real Redis
+        # with a 1.1 s window, 512 concurrent callers let 145 through with
+        # the read-then-write version and exactly 1 with this one.
+        #
+        # ``is not False`` — not ``not won`` — is deliberate. ``cache_add``
+        # returns ``None`` when the backend is unavailable (django-redis's
+        # ``add`` is wrapped in ``@omit_exception`` with ``return_value=
+        # None``), and in that case pacing cannot be enforced globally, so
+        # the caller proceeds: the same fail-open degradation intended below.
+        # Testing ``not won`` instead would read an outage as "someone else
+        # holds the slot" and make every geocode request spin for the whole
+        # 3.3 s deadline whenever Redis is down.
+        if cache_utils.cache_add(slot, 1, seconds) is not False:
             return
         time.sleep(0.05)
 

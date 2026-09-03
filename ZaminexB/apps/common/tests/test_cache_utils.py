@@ -424,3 +424,39 @@ class CircuitBreakerTests(TestCase):
             key = make_key("test", "cb-swap-locmem")
             cache_set(key, {"x": 1}, 30)
             self.assertEqual(cache_get(key), {"x": 1}, "LocMem must not be starved")
+
+
+class CacheAddTests(TestCase):
+    """``cache_add`` is the atomic set-if-absent the pacing and lock paths
+    share. Its three-way result is the whole point: ``None`` (backend
+    unavailable) must not be confused with ``False`` (someone else won)."""
+
+    def test_first_caller_wins_and_the_second_loses(self):
+        key = make_key("test", "add")
+        cache_delete(key)
+        self.assertTrue(cache_utils.cache_add(key, 1, 30))
+        self.assertFalse(cache_utils.cache_add(key, 1, 30))
+
+    def test_a_swallowed_error_returns_none_not_false(self):
+        class _Swallowing:
+            def add(self, *args, **kwargs):
+                return None  # what django-redis returns via IGNORE_EXCEPTIONS
+
+        key = make_key("test", "add-down")
+        with override_settings(
+            CACHES={"default": {"BACKEND": "django_redis.cache.RedisCache"}}
+        ), mock.patch.object(cache_utils, "_cache", return_value=_Swallowing()):
+            cache_utils.reset_backend_availability()
+            try:
+                self.assertIsNone(cache_utils.cache_add(key, 1, 30))
+            finally:
+                cache_utils.reset_backend_availability()
+
+    def test_a_raising_backend_returns_none(self):
+        class _Raising:
+            def add(self, *args, **kwargs):
+                raise ConnectionError("redis is down")
+
+        key = make_key("test", "add-raise")
+        with mock.patch.object(cache_utils, "_cache", return_value=_Raising()):
+            self.assertIsNone(cache_utils.cache_add(key, 1, 30))
