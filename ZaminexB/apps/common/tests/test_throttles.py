@@ -323,3 +323,104 @@ class ResilientThrottleTests(_AvailabilityTrackingTestsMixin, TestCase):
         results = [throttle.allow_request(_Request(), _View()) for _ in range(8)]
         # No extra allowances beyond the configured five.
         self.assertEqual(results.count(True), 5)
+
+
+class ThrottleRateCoverageTests(TestCase):
+    """Every configured rate must have something behind it.
+
+    ``login``, ``export`` and ``file_upload`` sat in ``DEFAULT_THROTTLE_RATES``
+    with no view naming them, which reads like protection and is none: the
+    next person to look at the settings reasonably concludes exports are
+    capped at 10/hour when they are not. Walking the URLconf turns that into
+    a suite failure instead of a false belief.
+    """
+
+    # Scopes carried by the default throttle classes, which apply to any view
+    # that does not declare its own ``throttle_classes``. Named here rather
+    # than read from ``DEFAULT_THROTTLE_CLASSES`` because the test runner
+    # empties that setting (see ``config/settings.py``).
+    DEFAULT_CLASS_SCOPES = {"anon", "user"}
+
+    def _reachable_api_views(self):
+        from django.urls import get_resolver
+        from rest_framework.views import APIView
+
+        found = []
+
+        def walk(resolver):
+            for pattern in resolver.url_patterns:
+                if hasattr(pattern, "url_patterns"):
+                    walk(pattern)
+                    continue
+                callback = pattern.callback
+                cls = getattr(callback, "view_class", None) or getattr(callback, "cls", None)
+                if cls is not None and issubclass(cls, APIView):
+                    found.append(cls)
+
+        walk(get_resolver())
+        return found
+
+    def _scopes_in_force(self):
+        """Every throttle scope a reachable view can actually apply."""
+        from rest_framework.throttling import ScopedRateThrottle
+
+        used = set(self.DEFAULT_CLASS_SCOPES)
+        for view in self._reachable_api_views():
+            classes = getattr(view, "throttle_classes", ()) or ()
+            for cls in classes:
+                # A throttle class may carry its own scope (e.g.
+                # PasswordResetRateThrottle).
+                scope = getattr(cls, "scope", None)
+                if scope:
+                    used.add(scope)
+            # A ScopedRateThrottle subclass has scope = None on the class and
+            # resolves it from the view at request time, so the view's
+            # `throttle_scope` attribute is the real source.
+            if any(issubclass(c, ScopedRateThrottle) for c in classes):
+                view_scope = getattr(view, "throttle_scope", None)
+                if view_scope:
+                    used.add(view_scope)
+        return used
+
+    def test_the_urlconf_walk_finds_views(self):
+        """Guards the guard: an empty walk would make every other assertion
+        here vacuously true."""
+        self.assertGreater(len(self._reachable_api_views()), 50)
+
+    def test_the_walk_sees_the_scoped_views(self):
+        """Guards the guard again: a scoped throttle carries its scope on the
+        *view*, not on the class, so a walk that only read class attributes
+        would silently miss both of these."""
+        self.assertIn("ai", self._scopes_in_force())
+        self.assertIn("geocode", self._scopes_in_force())
+
+    def test_no_configured_rate_is_dead(self):
+        from django.conf import settings
+
+        configured = set(settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"])
+        self.assertEqual(
+            configured - self._scopes_in_force(),
+            set(),
+            "rates declared with no view behind them protect nothing",
+        )
+
+    def test_no_view_uses_a_scope_without_a_rate(self):
+        """The mirror image: a view naming an unconfigured scope makes DRF
+        raise ImproperlyConfigured on the first request."""
+        from django.conf import settings
+
+        configured = set(settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"])
+        declared = self._scopes_in_force() - self.DEFAULT_CLASS_SCOPES
+        self.assertEqual(
+            declared - configured,
+            set(),
+            "views whose throttle_scope has no matching rate",
+        )
+
+    def test_the_expected_scopes_are_the_ones_in_force(self):
+        """Pins the actual coverage, so adding or dropping a scope is a
+        deliberate, reviewed change."""
+        self.assertEqual(
+            self._scopes_in_force(),
+            {"anon", "user", "password_reset", "ai", "geocode"},
+        )

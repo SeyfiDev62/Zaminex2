@@ -417,15 +417,19 @@ REST_FRAMEWORK = {
         "apps.common.throttles.ResilientScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
+        # These two apply to every DRF view, because DEFAULT_THROTTLE_CLASSES
+        # includes AnonRateThrottle and UserRateThrottle and a view that does
+        # not declare its own throttle_classes inherits them. So an endpoint
+        # with no explicit scope is not unthrottled — it is covered here.
         "anon": "60/min",
         "user": "300/min",
-        # Sensitive endpoints: a tighter scope prevents brute-forcing or
-        # runaway AI / CSV export costs.
+        # Tighter per-endpoint scopes. Each one is only in force on a view
+        # that names it via `throttle_scope`; a rate declared here with no
+        # such view protects nothing while reading like it does, which is
+        # worse than not declaring it. (test_throttles.py walks the URLconf
+        # and fails if one goes unused.)
         "password_reset": "5/hour",
-        "login": "10/min",
         "ai": "10/hour",
-        "export": "10/hour",
-        "file_upload": "20/min",
         # A geocode lookup fans out into up to three upstream calls (the query
         # ladder), so this is generous for a human but still bounds a runaway.
         "geocode": "60/min",
