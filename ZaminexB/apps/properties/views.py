@@ -29,6 +29,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from apps.common.access import can_access_property, can_manage_property
+from apps.common.cache_invalidation import invalidate_property_caches
 from .validators import validate_appraisal_pdf, validate_property_image
 
 from .serializers import (
@@ -366,6 +367,7 @@ class PropertyViewSet(viewsets.ModelViewSet):
                 {"detail": "فرمت ورودی نامعتبر است. لیستی از {id, sort_order} انتظار می‌رود."},
                 status=400,
             )
+        changed = 0
         for item in order_data:
             img_id = item.get("id")
             sort_order = item.get("sort_order")
@@ -374,6 +376,15 @@ class PropertyViewSet(viewsets.ModelViewSet):
             PropertyImage.objects.filter(
                 pk=img_id, property=property_obj
             ).update(sort_order=sort_order)
+            changed += 1
+
+        # ``QuerySet.update`` emits no ``post_save``, so the Phase-4 receivers
+        # never see these writes and the cached property report would linger
+        # until its TTL. Drop the keys explicitly, exactly as the reference-data
+        # reorder in apps/basics/views.py does. Fail-open: the helper swallows
+        # cache errors and the TTL is the backstop either way.
+        if changed:
+            invalidate_property_caches(property_obj)
         images = PropertyImage.objects.filter(
             property=property_obj
         ).order_by("sort_order", "id")

@@ -17,6 +17,9 @@ Fail-open by requirement: a cache problem during a save must never break the
 write. ``cache_utils`` swallows cache errors itself; the only other
 failure source is the small admin-lookup query, which is guarded too and
 only degrades to "TTL will clean it up".
+
+Signals only cover instance-level writes. Anything that writes through a
+queryset has to call :func:`invalidate_property_caches` itself.
 """
 
 from __future__ import annotations
@@ -91,6 +94,34 @@ def _on_image(sender, instance, **kwargs) -> None:
         prop = Property.objects.filter(pk=instance.property_id).only("consultant_id").first()
         if prop is not None:
             _invalidate_users({prop.consultant_id})
+
+
+def invalidate_property_caches(prop) -> None:
+    """Invalidate what a change to this property could have made stale.
+
+    Django sends no ``post_save``/``post_delete`` for queryset-level writes:
+    ``QuerySet.update()`` bypasses them entirely, and ``QuerySet.delete()``
+    on a soft-delete model is itself an ``update()`` (see
+    ``SoftDeleteQuerySet.delete``). A view that writes in bulk therefore
+    never reaches the receivers above and has to invalidate explicitly —
+    this is the public entry point for those call sites, and it mirrors what
+    the ``PropertyImage`` receiver would have done (the property report plus
+    the owning consultant's aggregates; ``stats:neighborhoods`` is not
+    touched, because image-level changes cannot move it).
+
+    Accepts a ``Property`` instance or a primary key. Fail-open, like every
+    other path here: an unavailable cache just means the TTL backstop.
+    """
+    prop_id = getattr(prop, "pk", prop)
+    _invalidate_property(prop_id)
+    consultant_id = getattr(prop, "consultant_id", None)
+    if consultant_id is None and prop_id:
+        from apps.properties.models import Property
+
+        found = Property.objects.filter(pk=prop_id).only("consultant_id").first()
+        consultant_id = found.consultant_id if found is not None else None
+    _invalidate_users({consultant_id})
+
 
 
 def register() -> None:

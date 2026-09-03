@@ -12,6 +12,7 @@ Covers the roadmap's acceptance points:
 
 import datetime
 import io
+import json
 from unittest import mock
 
 from django.core.cache import cache as django_cache
@@ -362,3 +363,98 @@ class InvalidationFailOpenTests(Phase4Base):
             res = client.get("/common/api/analytics/dashboard/")
         self.assertEqual(res.status_code, 200)
         self.assertIn("kpis", res.json())
+
+
+class PropertyImageReorderInvalidationTests(Phase4Base):
+    """``images-reorder`` persists via ``QuerySet.update``, which emits no
+    ``post_save`` — the Phase-4 receivers never see the write, so the view
+    has to drop the keys itself or the report stays stale for the full TTL.
+    """
+
+    URL_TMPL = "/properties/api/properties/{pk}/images-reorder/"
+
+    def setUp(self):
+        super().setUp()
+        self.images = [
+            PropertyImage.objects.create(
+                property=self.prop,
+                image=SimpleUploadedFile(f"p4-{i}.png", _PNG),
+                sort_order=i,
+            )
+            for i in range(3)
+        ]
+        self.client = Client(SERVER_NAME="localhost")
+        self.client.force_login(self.agent)  # the consultant who owns it
+
+    def _reorder(self, order, client=None):
+        return (client or self.client).patch(
+            self.URL_TMPL.format(pk=self.prop.pk),
+            data=json.dumps({"order": order}),
+            content_type="application/json",
+        )
+
+    def _report_key(self):
+        return cache_utils.make_key("report", "property", self.prop.pk)
+
+    def test_reorder_drops_the_cached_property_report(self):
+        with mock.patch(
+            "apps.reports.caching.compute_property_report",
+            wraps=compute_property_report,
+        ) as m:
+            cached_property_report(self.prop)
+            self.assertEqual(m.call_count, 1)
+
+            res = self._reorder([{"id": self.images[2].pk, "sort_order": 0}])
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(
+                PropertyImage.objects.get(pk=self.images[2].pk).sort_order, 0
+            )
+
+            cached_property_report(self.prop)
+        self.assertEqual(m.call_count, 2, "the report must be recomputed, not served stale")
+
+    def test_reorder_drops_the_consultant_and_dashboard_keys(self):
+        """The image receiver invalidates the owner's aggregates too."""
+        for domain in ("report:consultant", "dashboard"):
+            key = cache_utils.make_key(*domain.split(":"), self.agent.pk)
+            cache_utils.cache_set(key, {"seeded": True}, 120)
+            self.assertIsNotNone(cache_utils.cache_get(key))
+
+        self.assertEqual(
+            self._reorder([{"id": self.images[0].pk, "sort_order": 9}]).status_code, 200
+        )
+        for domain in ("report:consultant", "dashboard"):
+            key = cache_utils.make_key(*domain.split(":"), self.agent.pk)
+            self.assertIsNone(cache_utils.cache_get(key), domain)
+
+    def test_a_noop_payload_leaves_the_cache_alone(self):
+        """No valid entries → nothing was written → no invalidation."""
+        cache_utils.cache_set(self._report_key(), {"seeded": True}, 120)
+        res = self._reorder([{"id": None, "sort_order": None}])
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNotNone(cache_utils.cache_get(self._report_key()))
+
+    def test_a_rejected_reorder_leaves_the_cache_alone(self):
+        """A refused reorder returns before any write, so it drops nothing.
+
+        The viewset's queryset is already scoped by ``can_access_property``,
+        so another consultant does not even see the property (404); the
+        explicit ``can_manage_property`` check is what answers 403 for a
+        user who can view but not manage. Either way nothing was written.
+        """
+        cache_utils.cache_set(self._report_key(), {"seeded": True}, 120)
+        intruder = Client(SERVER_NAME="localhost")
+        intruder.force_login(self.agent2)  # a different consultant
+        res = self._reorder([{"id": self.images[0].pk, "sort_order": 9}], client=intruder)
+        self.assertIn(res.status_code, (403, 404))
+        self.assertEqual(
+            PropertyImage.objects.get(pk=self.images[0].pk).sort_order, 0, "no write"
+        )
+        self.assertIsNotNone(cache_utils.cache_get(self._report_key()))
+
+    def test_invalidation_survives_a_dead_cache(self):
+        """Fail-open: the reorder still succeeds when the cache is down."""
+        with mock.patch.object(cache_utils, "_cache", return_value=_DeadCache()):
+            res = self._reorder([{"id": self.images[1].pk, "sort_order": 7}])
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(PropertyImage.objects.get(pk=self.images[1].pk).sort_order, 7)
