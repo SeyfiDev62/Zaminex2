@@ -361,6 +361,59 @@ class TicketSecurityTests(TestCase):
         )
         self.assertEqual(forbidden_download.status_code, 404)
 
+    def test_recipient_downloads_the_senders_attachment(self):
+        """The reported flow: sender attaches, recipient must be able to fetch it."""
+
+        self._auth(self.owner)
+        created = self.client.post(
+            "/tickets/api/tickets/",
+            self._multipart_ticket_payload(
+                attachments=SimpleUploadedFile(
+                    "گزارش.pdf", b"%PDF-1.7\nbody", content_type="application/pdf"
+                ),
+            ),
+            format="multipart",
+        )
+        self.assertEqual(created.status_code, 201, created.json())
+        attachment = created.json()["messages"][0]["attachments"][0]
+
+        self._auth(self.recipient)
+        download = self.client.get(attachment["downloadUrl"])
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(b"".join(download.streaming_content)[:5], b"%PDF-")
+        # The original (Persian) name must survive the round trip as a
+        # RFC 5987 filename*, otherwise the saved file loses its name.
+        self.assertIn("filename*=utf-8''", download["Content-Disposition"])
+
+    def test_lost_attachment_file_is_reported_as_missing_and_logged(self):
+        """A wiped media tree must not be indistinguishable from a denial."""
+
+        self._auth(self.owner)
+        created = self.client.post(
+            "/tickets/api/tickets/",
+            self._multipart_ticket_payload(
+                attachments=SimpleUploadedFile(
+                    "evidence.pdf", b"%PDF-1.7\nbody", content_type="application/pdf"
+                ),
+            ),
+            format="multipart",
+        )
+        attachment = created.json()["messages"][0]["attachments"][0]
+        stored = TicketAttachment.objects.get(pk=attachment["id"])
+        stored.file.storage.delete(stored.file.name)
+
+        self._auth(self.recipient)
+        with self.assertLogs("apps.tickets.views", level="WARNING") as logs:
+            missing = self.client.get(attachment["downloadUrl"])
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()["detail"], "فایل یافت نشد.")
+        # The warning must name the exact storage path, or an operator cannot
+        # tell a lost file apart from a permission problem.
+        self.assertTrue(
+            any(stored.file.name in line for line in logs.output),
+            logs.output,
+        )
+
     def test_rejects_fake_attachment_extension_and_rolls_back_everything(self):
         self._auth(self.owner)
         response = self.client.post(

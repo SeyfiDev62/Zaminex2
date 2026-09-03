@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import datetime
 import io
+import logging
 from urllib.parse import quote
 
 from django.contrib.auth import get_user_model
@@ -64,6 +65,8 @@ from .services import (
 
 
 User = get_user_model()
+
+logger = logging.getLogger(__name__)
 
 # Phase 5: the ticket unread badge is polled by the SPA (30 s, often from
 # several tabs). The count is tiny and per-user, so a very short per-user
@@ -872,12 +875,29 @@ class TicketAttachmentDownloadView(APIView):
             # ids; it prevents an attachment-id oracle.
             raise Http404("پیوست یافت نشد.")
         if not attachment.file:
+            logger.warning(
+                "پیوست تیکت %s هیچ فایلی ثبت نشده است (پیام %s).",
+                attachment.pk,
+                attachment.message_id,
+            )
             return Response(
                 {"detail": "فایل یافت نشد."}, status=status.HTTP_404_NOT_FOUND
             )
         try:
             file_handle = attachment.file.open("rb")
-        except (FileNotFoundError, OSError):
+        except (FileNotFoundError, OSError) as exc:
+            # The row survived but its bytes did not: the media tree was moved
+            # or wiped after the upload (see the MEDIA_ROOT note in
+            # config/settings.py). This is an operator problem, not a
+            # permission one, so it is logged with the exact expected path —
+            # otherwise a lost file is indistinguishable from a denied one and
+            # the user is only ever shown «فایل یافت نشد.»
+            logger.warning(
+                "فایل پیوست تیکت %s روی دیسک نیست: %s (%s)",
+                attachment.pk,
+                attachment.file.name,
+                exc,
+            )
             return Response(
                 {"detail": "فایل یافت نشد."}, status=status.HTTP_404_NOT_FOUND
             )

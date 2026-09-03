@@ -233,7 +233,45 @@ LOGOUT_REDIRECT_URL = "/accounts/login/"
 
 # Task 4: media settings
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+
+
+def _resolve_media_root(value: str, base: Path) -> Path:
+    """Turn the optional ``MEDIA_ROOT`` environment value into a real path.
+
+    A relative value is resolved against the project directory, never against
+    the process working directory, so the upload tree cannot silently move when
+    the server is started from another folder.
+    """
+
+    candidate = Path(value).expanduser()
+    return candidate if candidate.is_absolute() else (base / candidate).resolve()
+
+
+# Uploads have to outlive the code that points at them.
+#
+# The default keeps the tree inside the checkout so a plain clone works with no
+# configuration at all. A deployment that resets its working tree, however —
+# ``git clean -fd``, ``git checkout -f``, a fresh clone, a rebuilt container
+# image — then deletes every uploaded file while its database row survives, and
+# the download endpoint answers 404 «فایل یافت نشد.» forever after. That is
+# exactly the "پیوست تیکت دانلود نمی‌شود" bug. ``.gitignore`` already keeps the
+# upload tree out of version control so ``git clean -fd`` skips it; point
+# MEDIA_ROOT at a persistent path outside the repository as well when the
+# checkout itself is disposable:
+#
+#     export MEDIA_ROOT=/var/lib/zaminex/media
+#
+_env_media_root = os.environ.get("MEDIA_ROOT", "").strip()
+MEDIA_ROOT = (
+    _resolve_media_root(_env_media_root, BASE_DIR)
+    if _env_media_root
+    else BASE_DIR / "media"
+)
+
+# Created eagerly so a freshly mounted volume accepts the first upload instead
+# of failing with FileNotFoundError, and a mis-typed path surfaces at start-up
+# rather than at somebody's first download.
+os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 # Account-scoped login protection: 5 failed attempts in 15 minutes => 10-minute lock.
 LOGIN_FAILURE_LIMIT = 5

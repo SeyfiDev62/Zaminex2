@@ -8,3 +8,14 @@ ZaminexF/node_modules/
 ZaminexF/dist/
 .venv/
 __venv__/
+
+# User uploads. Only the seed images that ship with the repository are tracked;
+# anything uploaded at runtime must stay out of version control. This is what
+# keeps a deploy that resets the working tree (`git clean -fd`, `git checkout
+# -f`) from deleting uploaded files: git clean skips ignored paths, and a
+# deleted file leaves its database row behind, so every download of it then
+# answers 404 «فایل یافت نشد.» — the ticket-attachment bug. Add a new seed
+# image deliberately with `git add -f`. For a disposable checkout, point the
+# MEDIA_ROOT environment variable at a persistent path instead (see
+# ZaminexB/config/settings.py).
+ZaminexB/media/

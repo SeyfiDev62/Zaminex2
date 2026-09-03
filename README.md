@@ -290,6 +290,36 @@ kept re-typing something that was never looked up.
 
 ---
 
+## 12. Uploaded Files (Media)
+
+Every upload — ticket attachments, property images, appraisal PDFs, profile
+photos — is written to `MEDIA_ROOT`. Database rows only ever store the *path*,
+never the bytes, so the file has to stay exactly where it was written.
+
+If the file disappears while its row survives, the download endpoint answers
+`404 «فایل یافت نشد.»` forever, and the server log names the missing path
+(`فایل پیوست تیکت … روی دیسک نیست: …`). That is an operator problem, not a
+permission one.
+
+| Setting | Default | Why you would change it |
+| --- | --- | --- |
+| `MEDIA_ROOT` | `ZaminexB/media` (inside the checkout) | Point at a persistent path outside the repository so a code deploy can never touch uploads. A relative value is resolved against `ZaminexB/`, not against the current working directory. |
+
+```bash
+# Persistent uploads, outside the code tree:
+export MEDIA_ROOT=/var/lib/zaminex/media
+```
+
+`ZaminexB/media/` is git-ignored (only the seed images that ship with the
+repository are tracked), so a deploy that resets the working tree —
+`git clean -fd`, `git checkout -f` — leaves uploads alone. Set `MEDIA_ROOT` as
+well when the checkout itself is disposable, e.g. a rebuilt container image.
+
+**Back up the media directory together with the database.** A `pg_dump` restore
+without the matching media tree brings the rows back but not the files.
+
+---
+
 ## Quick Checklist
 
 - [ ] PostgreSQL installed, password `zaminex`, PATH set permanently
@@ -298,3 +328,4 @@ kept re-typing something that was never looked up.
 - [ ] Restored from `zaminex_backup.sql` OR fresh install with `seed_data.json`
 - [ ] `python manage.py runserver`
 - [ ] After real data entry, immediately `pg_dump` backup
+- [ ] `MEDIA_ROOT` on a persistent path outside the code tree, and backed up with the database
