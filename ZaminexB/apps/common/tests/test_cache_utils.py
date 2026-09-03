@@ -460,3 +460,156 @@ class CacheAddTests(TestCase):
         key = make_key("test", "add-raise")
         with mock.patch.object(cache_utils, "_cache", return_value=_Raising()):
             self.assertIsNone(cache_utils.cache_add(key, 1, 30))
+
+
+class FailOpenScopeTests(TestCase):
+    """``IGNORE_EXCEPTIONS`` is narrower than its name.
+
+    django-redis's ``omit_exception`` catches ``ConnectionInterrupted`` and
+    nothing else, and ``DefaultClient.set`` encodes the value *before* it
+    enters its ``try`` block. So a payload the serializer rejects is a plain
+    programming error that propagates straight out of ``cache.set`` — the
+    fail-open guarantee covers the network, not the code.
+
+    That is safe today only because of a discipline: every production write
+    goes through ``cache_utils``, which encodes first and catches, and the
+    session path is already JSON-constrained upstream of the cache. Both
+    halves are pinned below, because the guarantee is invisible otherwise.
+    """
+
+    REDIS_OPTIONS = {
+        "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        "SERIALIZER": "django_redis.serializers.json.JSONSerializer",
+        "IGNORE_EXCEPTIONS": True,
+        "SOCKET_CONNECT_TIMEOUT": 0.2,
+        "SOCKET_TIMEOUT": 0.2,
+    }
+
+    def _redis(self):
+        from django_redis.cache import RedisCache
+
+        # The port is never contacted: encoding fails before any I/O.
+        return RedisCache("redis://127.0.0.1:63999/0", {"OPTIONS": self.REDIS_OPTIONS})
+
+    def test_a_serialisation_error_is_not_swallowed(self):
+        class NotJson:
+            pass
+
+        with self.assertRaises(TypeError):
+            self._redis().set("probe:weird", {"o": NotJson()}, 30)
+
+    def test_a_connection_error_still_is_swallowed(self):
+        """The contrast that defines the boundary."""
+        self.assertIsNone(self._redis().get("probe:missing"))
+
+    def test_cache_utils_still_swallows_both(self):
+        """The helper layer is what consumers actually call, and it catches
+        the encode failure the backend would have propagated."""
+        class NotJson:
+            def __repr__(self):
+                raise ValueError("nope")
+
+        key = make_key("test", "weird")
+        with mock.patch.object(
+            cache_utils, "_encode", side_effect=TypeError("not serializable")
+        ):
+            self.assertFalse(cache_set(key, {"o": NotJson()}, 30))
+        self.assertIsNone(cache_get(key))
+
+    def test_the_json_serializer_is_configured_not_pickle(self):
+        """Pickle would serialize anything and hide this whole class of
+        error — at the cost of unreadable values in redis-cli and a
+        deserialization surface on every read."""
+        from config.settings import _cache_settings
+
+        with mock.patch.dict(os.environ, {"REDIS_URL": "redis://cache.internal:6379/0"}):
+            options = _cache_settings()["default"]["OPTIONS"]
+        self.assertEqual(
+            options["SERIALIZER"], "django_redis.serializers.json.JSONSerializer"
+        )
+        self.assertNotIn("pickle", options["SERIALIZER"])
+
+    def test_the_session_serializer_rejects_non_json_before_the_cache(self):
+        """The second half of the discipline: ``SESSION_SERIALIZER`` is
+        Django's JSON one, so a session holding an unserializable object
+        fails in ``signing.dumps`` — upstream of any cache write — which is
+        why the session path can never be the source of a serializer error
+        reaching Redis."""
+        from importlib import import_module
+
+        from django.conf import settings
+        from django.contrib.sessions.serializers import JSONSerializer
+
+        # The setting is not declared in config/settings.py, so this asserts
+        # Django's default is the one in force -- and that nothing has
+        # switched it to the pickle serializer.
+        self.assertEqual(
+            getattr(
+                settings,
+                "SESSION_SERIALIZER",
+                "django.contrib.sessions.serializers.JSONSerializer",
+            ),
+            "django.contrib.sessions.serializers.JSONSerializer",
+        )
+        store = import_module(settings.SESSION_ENGINE).SessionStore()
+        self.assertIs(store.serializer, JSONSerializer)
+
+        class NotJson:
+            pass
+
+        with self.assertRaises(TypeError):
+            store.serializer().dumps({"weird": NotJson()})
+
+
+class CacheAccessDisciplineTests(TestCase):
+    """Only ``cache_utils`` may import ``django.core.cache``.
+
+    ``IGNORE_EXCEPTIONS`` does not protect a caller from its own bad payload,
+    so a module that writes to the shared cache directly is one programming
+    error away from turning a cache write into a 500. Keeping the import
+    surface at one file is what makes that hypothetical: this walks the
+    source tree, so a new direct consumer fails the suite and gets reviewed
+    instead of landing silently.
+    """
+
+    ALLOWED = {
+        # The fail-open helper layer every production consumer goes through.
+        "apps/common/cache_utils.py",
+    }
+    # Not production code: test helpers may reach the cache directly to set
+    # up or assert on state.
+    SKIPPED_PARTS = {"tests", "migrations", "__pycache__"}
+
+    def _production_importers(self):
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[3]  # .../ZaminexB
+        importers = []
+        for path in sorted(root.rglob("*.py")):
+            relative = path.relative_to(root).as_posix()
+            if any(part in self.SKIPPED_PARTS for part in path.parts):
+                continue
+            if path.name == "testing.py" or path.name.startswith("test_"):
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:  # pragma: no cover - a syntax error fails elsewhere
+                continue
+            for node in ast.walk(tree):
+                modules = []
+                if isinstance(node, ast.ImportFrom):
+                    modules = [node.module or ""]
+                elif isinstance(node, ast.Import):
+                    modules = [alias.name or "" for alias in node.names]
+                if any("django.core.cache" in m for m in modules):
+                    importers.append(relative)
+                    break
+        return importers
+
+    def test_the_scan_actually_finds_the_helper(self):
+        """Guards the guard: an empty or mis-rooted scan would pass silently."""
+        self.assertIn("apps/common/cache_utils.py", self._production_importers())
+
+    def test_only_cache_utils_touches_django_core_cache(self):
+        self.assertEqual(self._production_importers(), sorted(self.ALLOWED))
