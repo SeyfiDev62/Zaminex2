@@ -404,9 +404,16 @@ class GeocodeViewTests(GeocodeTestBase):
         self.assertEqual(patched.call_count, 1)
 
     def test_throttled_with_its_own_scope(self):
+        from rest_framework.throttling import ScopedRateThrottle
+
         from apps.common.views import GeocodeView
 
-        self.assertIn("ScopedRateThrottle", [c.__name__ for c in GeocodeView.throttle_classes])
+        # A scoped limiter — the concrete class is the outage-resilient
+        # wrapper (apps/common/throttles.py), so assert the base type.
+        self.assertTrue(
+            all(issubclass(c, ScopedRateThrottle) for c in GeocodeView.throttle_classes),
+            GeocodeView.throttle_classes,
+        )
         self.assertEqual(GeocodeView.throttle_scope, "geocode")
 
     def test_the_endpoint_is_registered_under_the_common_api_prefix(self):

@@ -25,6 +25,7 @@ Phase 2 is infrastructure only — no consumer is wired to this module yet
 from __future__ import annotations
 
 import json
+import threading
 import time
 from contextlib import contextmanager
 from decimal import Decimal
@@ -38,6 +39,9 @@ __all__ = [
     "cache_delete",
     "cache_or_compute",
     "with_lock",
+    "backend_reports_delivery",
+    "note_cache_delivered",
+    "cache_backend_available",
 ]
 
 # Bump when the shape of a cached payload changes: readers then miss on the
@@ -104,6 +108,86 @@ def _cache():
     from django.core.cache import cache
 
     return cache
+
+
+# ---------------------------------------------------------------------------
+# Backend availability tracking
+# ---------------------------------------------------------------------------
+# ``IGNORE_EXCEPTIONS`` makes django-redis swallow connection errors, so a
+# dead or hung backend is *invisible to a read*: ``cache.get(key, default)``
+# returns the default whether the key is simply missing or the backend is
+# gone. Callers that must tell "empty" apart from "unavailable" (throttling
+# is the important one) therefore need a second signal.
+#
+# A *write* is not invisible. django-redis returns ``True`` when the value
+# landed and ``None`` when ``omit_exception`` swallowed the error, so the
+# return value of ``cache.set`` is the one bit of truth we get. It is
+# recorded here, with a cooldown: while the backend is marked down, callers
+# should serve from their own degraded path instead of paying a socket
+# timeout on every operation, and after the cooldown expires the next real
+# write probes it again (a half-open circuit breaker).
+#
+# Django's own backends (LocMem/Dummy/FileBased) return ``None`` from
+# ``set()`` on *success*, so the signal only means something for the
+# django-redis backend — which is also the only one that can fail silently,
+# the others being in-process or on the local filesystem.
+# ---------------------------------------------------------------------------
+
+# How long a backend stays marked down before the next write probes it again:
+# long enough to avoid paying the timeout on every request during an outage,
+# short enough to notice recovery promptly.
+BACKEND_REPROBE_SECONDS = 5.0
+
+_backend_reports_delivery: bool | None = None
+_backend_down_until = 0.0
+_backend_state_lock = threading.Lock()
+
+
+def backend_reports_delivery() -> bool:
+    """Whether the configured backend signals a swallowed error as ``None``.
+
+    Only the django-redis backend does; the rest of Django's return ``None``
+    on success and cannot fail silently, so the tracking below is a no-op for
+    them. Resolved once per process.
+    """
+    global _backend_reports_delivery
+    if _backend_reports_delivery is None:
+        from django.conf import settings
+
+        backend = settings.CACHES.get("default", {}).get("BACKEND", "")
+        _backend_reports_delivery = "django_redis" in backend
+    return _backend_reports_delivery
+
+
+def note_cache_delivered(delivered: Any) -> None:
+    """Record the outcome of a cache write.
+
+    ``delivered`` is the raw return value of ``cache.set``: truthy means the
+    value landed, falsy means the backend swallowed an error. A no-op for
+    backends whose ``set`` cannot report failure.
+    """
+    if not backend_reports_delivery():
+        return
+    global _backend_down_until
+    with _backend_state_lock:
+        _backend_down_until = 0.0 if delivered else time.monotonic() + BACKEND_REPROBE_SECONDS
+
+
+def cache_backend_available() -> bool:
+    """Whether the shared cache is believed to be working right now.
+
+    ``True`` is "no recent failure observed", not a guarantee: the next real
+    operation is what actually probes the backend.
+    """
+    return time.monotonic() >= _backend_down_until
+
+
+def reset_backend_availability() -> None:
+    """Clear the recorded backend state (tests and health probes)."""
+    global _backend_reports_delivery, _backend_down_until
+    with _backend_state_lock:
+        _backend_reports_delivery = None
+        _backend_down_until = 0.0
 
 
 def make_key(domain: str, *parts: Any) -> str:

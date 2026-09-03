@@ -386,9 +386,13 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
-        "rest_framework.throttling.ScopedRateThrottle",
+        # Resilient wrappers: the stock DRF classes read their history with
+        # ``cache.get(key, [])``, which with IGNORE_EXCEPTIONS cannot tell an
+        # empty counter from a dead backend — so a Redis outage would turn
+        # every rate limit off. See apps/common/throttles.py.
+        "apps.common.throttles.ResilientAnonRateThrottle",
+        "apps.common.throttles.ResilientUserRateThrottle",
+        "apps.common.throttles.ResilientScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min",

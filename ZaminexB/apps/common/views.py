@@ -1,10 +1,9 @@
 from rest_framework import status, permissions
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from .throttles import PasswordResetRateThrottle
+from .throttles import PasswordResetRateThrottle, ResilientScopedRateThrottle
 
 from .models import CompanySettings
 from .serializers import CompanySettingsSerializer
@@ -277,7 +276,7 @@ class GeocodeView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [ResilientScopedRateThrottle]
     throttle_scope = "geocode"
 
     def get(self, request):

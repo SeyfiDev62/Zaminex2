@@ -10,7 +10,6 @@ from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.throttling import ScopedRateThrottle
 
 from apps.accounts.models import ConsultantProfile, UserRole
 from apps.followups.models import FollowUp, FollowUpStatus
@@ -19,6 +18,7 @@ from apps.properties.models import Property
 from apps.tasks.models import Task
 
 from apps.common import cache_utils
+from apps.common.throttles import ResilientScopedRateThrottle
 
 from .metrics import (
     build_neighborhood_price_stats_map,
@@ -909,7 +909,7 @@ class AIInsightView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [ResilientScopedRateThrottle]
     throttle_scope = "ai"
 
     def post(self, request, entity, pk):
