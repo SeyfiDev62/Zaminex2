@@ -25,11 +25,14 @@ Phase 2 is infrastructure only — no consumer is wired to this module yet
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from contextlib import contextmanager
 from decimal import Decimal
 from typing import Any, Callable, Iterator
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CACHE_VERSION",
@@ -139,6 +142,7 @@ def _cache():
 BACKEND_REPROBE_SECONDS = 5.0
 
 _backend_reports_delivery: bool | None = None
+_backend_marked_down = False
 _backend_down_until = 0.0
 _backend_state_lock = threading.Lock()
 
@@ -165,28 +169,56 @@ def note_cache_delivered(delivered: Any) -> None:
     ``delivered`` is the raw return value of ``cache.set``: truthy means the
     value landed, falsy means the backend swallowed an error. A no-op for
     backends whose ``set`` cannot report failure.
+
+    State transitions are logged, once each, so an outage is a single
+    greppable line rather than something inferred from a stream of
+    ``django_redis`` tracebacks (which ``DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS``
+    emits for the underlying error).
     """
     if not backend_reports_delivery():
         return
-    global _backend_down_until
+    global _backend_marked_down, _backend_down_until
+    now = time.monotonic()
     with _backend_state_lock:
-        _backend_down_until = 0.0 if delivered else time.monotonic() + BACKEND_REPROBE_SECONDS
+        was_marked_down = _backend_marked_down
+        if delivered:
+            _backend_marked_down = False
+            _backend_down_until = 0.0
+        else:
+            # ``marked_down`` stays set across the cooldown so the warning
+            # fires once per outage rather than once per failed write.
+            _backend_marked_down = True
+            _backend_down_until = now + BACKEND_REPROBE_SECONDS
+    if delivered:
+        if was_marked_down:
+            logger.info("Cache backend is delivering writes again.")
+    elif not was_marked_down:
+        logger.warning(
+            "Cache backend is not delivering writes — serving degraded for "
+            "%.1fs before re-probing. Underlying error is logged by "
+            "django_redis.cache.",
+            BACKEND_REPROBE_SECONDS,
+        )
 
 
 def cache_backend_available() -> bool:
     """Whether the shared cache is believed to be working right now.
 
-    ``True`` is "no recent failure observed", not a guarantee: the next real
-    operation is what actually probes the backend.
+    ``True`` is "no failure recorded, or the re-probe cooldown has elapsed" —
+    not a guarantee: the next real operation is what actually probes the
+    backend, and a backend that is still down is re-marked immediately.
     """
+    if not _backend_marked_down:
+        return True
     return time.monotonic() >= _backend_down_until
 
 
 def reset_backend_availability() -> None:
     """Clear the recorded backend state (tests and health probes)."""
-    global _backend_reports_delivery, _backend_down_until
+    global _backend_reports_delivery, _backend_marked_down, _backend_down_until
     with _backend_state_lock:
         _backend_reports_delivery = None
+        _backend_marked_down = False
         _backend_down_until = 0.0
 
 

@@ -323,7 +323,10 @@ def _cache_settings():
                     # payloads, DRF throttle counters), so the JSON
                     # serializer is lossless for this app.
                     "SERIALIZER": "django_redis.serializers.json.JSONSerializer",
-                    # Fail-open: swallow backend errors as misses.
+                    # Fail-open: swallow backend errors as misses. The
+                    # errors are still recorded — see
+                    # DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS below; failing
+                    # open must not also mean failing silently.
                     "IGNORE_EXCEPTIONS": True,
                     # A hung Redis must not stall requests: bound the connect
                     # and read windows tightly.
@@ -341,6 +344,17 @@ def _cache_settings():
 
 
 CACHES = _cache_settings()
+
+# django-redis reads this as a top-level setting, not from OPTIONS. Without
+# it ``IGNORE_EXCEPTIONS`` swallows every backend error in silence: a dead or
+# hung Redis showed up only as slow responses and (before the throttle
+# fallback in apps/common/throttles.py) as rate limits quietly switching
+# themselves off — no 500, no warning, nothing to grep for. The underlying
+# exception is what distinguishes "connection refused" from "read timed out"
+# from "OOM command not allowed", so it is worth the log volume during an
+# outage; apps.common.cache_utils additionally logs a single, unambiguous
+# warning each time the backend transitions to down.
+DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS = True
 
 # ---------------------------------------------------------------------------
 #  Geocoding (map place search)

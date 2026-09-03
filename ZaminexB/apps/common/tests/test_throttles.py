@@ -14,6 +14,7 @@ over HTTP; the HTTP-level behaviour is covered by a manual run against
 ``runserver`` with ``REDIS_URL`` pointed at a closed port.
 """
 
+import logging
 import time
 
 from django.test import TestCase, override_settings
@@ -88,15 +89,22 @@ class _View:
 
 
 class _AvailabilityTrackingTestsMixin:
-    """Shared setUp/tearDown: the tracking state is process-global."""
+    """Shared setUp/tearDown: the tracking state is process-global.
+
+    The transition warnings are silenced here so a green run stays quiet;
+    :meth:`assertLogs` re-enables the level for the tests that assert on the
+    messages themselves.
+    """
 
     def setUp(self):
         cache_utils.reset_backend_availability()
         _clear_local_history()
+        logging.getLogger("apps.common.cache_utils").setLevel(logging.CRITICAL)
 
     def tearDown(self):
         cache_utils.reset_backend_availability()
         _clear_local_history()
+        logging.getLogger("apps.common.cache_utils").setLevel(logging.NOTSET)
 
 
 class BackendAvailabilityTests(_AvailabilityTrackingTestsMixin, TestCase):
@@ -141,6 +149,80 @@ class BackendAvailabilityTests(_AvailabilityTrackingTestsMixin, TestCase):
             cache_utils.note_cache_delivered(None)
             cache_utils.note_cache_delivered(True)
             self.assertTrue(cache_utils.cache_backend_available())
+
+
+class OutageLoggingTests(_AvailabilityTrackingTestsMixin, TestCase):
+    """A fail-open backend must not also be a silent one.
+
+    ``IGNORE_EXCEPTIONS`` swallowing an error is the point; swallowing it
+    *without a trace* is what made a dead Redis undiagnosable — no 500, no
+    warning, nothing to grep for.
+    """
+
+    DEAD_CACHE = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": "redis://127.0.0.1:63999/0",  # nothing listens here
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "IGNORE_EXCEPTIONS": True,
+                "SOCKET_CONNECT_TIMEOUT": 0.2,
+                "SOCKET_TIMEOUT": 0.2,
+            },
+        }
+    }
+
+    def test_django_redis_logging_is_enabled(self):
+        from django.conf import settings
+
+        self.assertTrue(settings.DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS)
+
+    def test_the_underlying_error_is_logged_with_its_cause(self):
+        """The swallowed exception itself, so "connection refused" can be
+        told apart from "read timed out" or an OOM rejection."""
+        from django_redis.cache import RedisCache
+
+        backend = RedisCache(
+            self.DEAD_CACHE["default"]["LOCATION"], self.DEAD_CACHE["default"]
+        )
+        self.assertTrue(backend._log_ignored_exceptions)
+        with self.assertLogs("django_redis.cache", level="ERROR") as cm:
+            self.assertIsNone(backend.get("probe:missing"))  # still fail-open
+        self.assertIn("Exception ignored", cm.output[0])
+        self.assertIn("refused", cm.output[0].lower())
+
+    def test_an_outage_logs_one_warning_not_one_per_request(self):
+        with override_settings(CACHES=REDIS_CACHES):
+            cache_utils.reset_backend_availability()
+            with self.assertLogs("apps.common.cache_utils", level="WARNING") as cm:
+                for _ in range(20):
+                    cache_utils.note_cache_delivered(None)
+            self.assertEqual(len(cm.output), 1)
+            self.assertIn("not delivering writes", cm.output[0])
+
+    def test_a_still_down_reprobe_does_not_log_again(self):
+        with override_settings(CACHES=REDIS_CACHES):
+            cache_utils.reset_backend_availability()
+            cache_utils.note_cache_delivered(None)
+            with self.assertNoLogs("apps.common.cache_utils", level="WARNING"):
+                for _ in range(5):
+                    cache_utils.note_cache_delivered(None)
+
+    def test_recovery_logs_one_info_line(self):
+        with override_settings(CACHES=REDIS_CACHES):
+            cache_utils.reset_backend_availability()
+            cache_utils.note_cache_delivered(None)
+            with self.assertLogs("apps.common.cache_utils", level="INFO") as cm:
+                cache_utils.note_cache_delivered(True)
+            self.assertEqual(len(cm.output), 1)
+            self.assertIn("delivering writes again", cm.output[0])
+
+    def test_a_healthy_backend_logs_nothing(self):
+        with override_settings(CACHES=REDIS_CACHES):
+            cache_utils.reset_backend_availability()
+            with self.assertNoLogs("apps.common.cache_utils", level="INFO"):
+                for _ in range(5):
+                    cache_utils.note_cache_delivered(True)
 
 
 @override_settings(CACHES=REDIS_CACHES)
