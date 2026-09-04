@@ -18,6 +18,7 @@ from apps.properties.models import Property
 from apps.tasks.models import Task
 
 from apps.common import cache_utils
+from apps.common.pagination import StandardResultsSetPagination
 from apps.common.throttles import ResilientScopedRateThrottle
 
 from .metrics import (
@@ -27,6 +28,8 @@ from .metrics import (
     consultant_ranking_metrics,
     consultant_followups_overdue_count,
     consultant_tasks_overdue_count,
+    high_prob_leads_by_property,
+    images_count_by_property,
     listing_marketing_metrics,
     property_market_metrics,
     annotate_effective_prices,
@@ -624,21 +627,102 @@ class ConsultantAnalyticsView(APIView):
         return Response({"consultants": rows})
 
 
+def _analytics_property_queryset(user):
+    """Role-scoped properties behind the analytics endpoints and the dashboard.
+
+    Every relation ``property_market_metrics`` walks is prefetched. Only
+    ``images`` used to be, so ``engagement_heat_score`` fell back to its
+    per-row branch and fired a follow-up and a task query for each property —
+    roughly 9.5 queries per row, which at 50k properties is the 476k-query
+    dashboard.
+    """
+    qs = Property.objects.prefetch_related("images", "followups", "tasks", "listings")
+    if getattr(user, "role", "") != "ADMIN":
+        qs = qs.filter(consultant=user)
+    return qs.order_by("-created_at")
+
+
+def _analytics_listing_queryset(user):
+    """Role-scoped listings behind the analytics endpoints and the dashboard.
+
+    ``property__followups`` and ``property__tasks`` are prefetched because
+    ``listing_marketing_metrics`` scores engagement off the listing's property,
+    and ``engagement_heat_score`` falls back to one query for each when they
+    are not in its prefetch cache — two per row otherwise.
+    """
+    qs = Listing.objects.select_related(
+        "property", "created_by", "assigned_to"
+    ).prefetch_related(
+        "property__images", "property__followups", "property__tasks"
+    )
+    if getattr(user, "role", "") != "ADMIN":
+        qs = qs.filter(Q(created_by=user) | Q(assigned_to=user))
+    return qs.order_by("-created_at")
+
+
+#: Every column the channel aggregate and its callees touch. ``.only()`` defers
+#: anything not listed, and reading a deferred field fires a ``refresh_from_db``
+#: per row — so this list has to stay complete. ``content_richness_score`` is
+#: the easy one to miss: it reads ``description``, ``title`` and all three money
+#: columns off the listing, and ``price``/``area``/``neighborhood`` off the
+#: property.
+_CHANNEL_SUMMARY_ONLY = (
+    "id",
+    "property_id",
+    "publish_channel",
+    "status",
+    "start_date",
+    "end_date",
+    "title",
+    "description",
+    "sale_price",
+    "deposit",
+    "monthly_rent",
+    "property__status",
+    "property__price",
+    "property__area",
+    "property__neighborhood",
+)
+
+
+def _channel_summary_for(user) -> list[dict]:
+    """Per-channel aggregate over every listing the caller may see.
+
+    Deliberately not scoped to a page: the dashboard's channel chart is a
+    summary of the whole book, and sampling one page would silently misreport
+    burn rate and average lifespan.
+    """
+    qs = Listing.objects.select_related("property").order_by("-created_at")
+    if getattr(user, "role", "") != "ADMIN":
+        qs = qs.filter(Q(created_by=user) | Q(assigned_to=user))
+    listings = list(qs.only(*_CHANNEL_SUMMARY_ONLY))
+    property_ids = [lst.property_id for lst in listings]
+    return channel_marketing_summary(
+        listings,
+        high_prob_leads_by_property(property_ids),
+        images_count_by_property(property_ids),
+    )
+
+
 class PropertyAnalyticsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-        qs = Property.objects.prefetch_related("images")
-        if getattr(user, "role", "") != "ADMIN":
-            qs = qs.filter(consultant=user)
-        properties = list(qs.order_by("-created_at"))
+        qs = _analytics_property_queryset(request.user)
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(qs, request)
+        properties = page if page is not None else list(qs)
+        # Built from a fresh query over the whole table, narrowed to the
+        # neighbourhoods present here — so paginating does not change what a
+        # row's priceDeviationIndex is measured against.
         neighborhood_stats = build_neighborhood_price_stats_map(properties)
         rows = []
         for prop in properties:
             row = {"id": prop.id, "title": prop.title, "neighborhood": prop.neighborhood}
             row.update(property_market_metrics(prop, neighborhood_stats))
             rows.append(row)
+        if page is not None:
+            return paginator.get_paginated_response(rows)
         return Response({"properties": rows})
 
 
@@ -646,18 +730,25 @@ class ListingAnalyticsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-        qs = Listing.objects.select_related("property", "created_by", "assigned_to").prefetch_related(
-            "property__images"
+        qs = _analytics_listing_queryset(request.user)
+        paginator = StandardResultsSetPagination()
+        page = paginator.paginate_queryset(qs, request)
+        listings = page if page is not None else list(qs)
+        # One grouped query for the whole batch. Without it, every row costs a
+        # COUNT here and another inside the channel summary.
+        high_prob_leads = high_prob_leads_by_property(
+            lst.property_id for lst in listings
         )
-        if getattr(user, "role", "") != "ADMIN":
-            from django.db.models import Q
-
-            qs = qs.filter(Q(created_by=user) | Q(assigned_to=user))
-        listings = list(qs.order_by("-created_at"))
-        rows = [listing_marketing_metrics(lst) for lst in listings]
-        channels = channel_marketing_summary(listings)
-        return Response({"listings": rows, "channels": channels})
+        rows = [
+            listing_marketing_metrics(lst, high_prob_leads) for lst in listings
+        ]
+        if page is not None:
+            response = paginator.get_paginated_response(rows)
+            response.data["channels"] = _channel_summary_for(request.user)
+            return response
+        return Response(
+            {"listings": rows, "channels": channel_marketing_summary(listings, high_prob_leads)}
+        )
 
 
 def _dashboard_kpis(user) -> dict:
@@ -784,17 +875,32 @@ class AnalyticsDashboardView(APIView):
 
         consultant_view = ConsultantAnalyticsView()
         consultant_view.request = request
-        property_view = PropertyAnalyticsView()
-        property_view.request = request
-        listing_view = ListingAnalyticsView()
-        listing_view.request = request
 
         c_data = consultant_view.get(request).data
-        p_data = property_view.get(request).data
-        l_data = listing_view.get(request).data
-
         top_consultants = (c_data.get("consultants") or [])[:5]
-        hot_properties = _hot_property_rows(p_data.get("properties") or [])
+
+        # The dashboard used to instantiate PropertyAnalyticsView and
+        # ListingAnalyticsView and read their full row lists, only to keep the
+        # top 5 properties, the channel aggregate and two counts. Those rows
+        # are now paginated, so read exactly what is displayed instead.
+        #
+        # The property set is materialised once and reused for the
+        # neighbourhood stats, the hot-property ranking and the count; every
+        # relation property_market_metrics walks is prefetched, so this is a
+        # handful of queries rather than ~9.5 per row.
+        properties = list(_analytics_property_queryset(user))
+        neighborhood_stats = build_neighborhood_price_stats_map(properties)
+        hot_properties = _hot_property_rows(
+            [
+                {
+                    "id": prop.id,
+                    "title": prop.title,
+                    "neighborhood": prop.neighborhood,
+                    **property_market_metrics(prop, neighborhood_stats),
+                }
+                for prop in properties
+            ]
+        )
 
         if is_admin:
             composition_qs = Property.active_objects.all()
@@ -829,10 +935,10 @@ class AnalyticsDashboardView(APIView):
             "kpis": _dashboard_kpis(user),
             "topConsultants": top_consultants,
             "hotProperties": hot_properties,
-            "channelSummary": l_data.get("channels") or [],
+            "channelSummary": _channel_summary_for(user),
             "consultantCount": len(c_data.get("consultants") or []),
-            "propertyCount": len(p_data.get("properties") or []),
-            "listingCount": len(l_data.get("listings") or []),
+            "propertyCount": len(properties),
+            "listingCount": _analytics_listing_queryset(user).count(),
             # Backwards-compatible flat list (month, revenue, count, total,
             # dealVolumes) plus the per-deal-type legend for the chart.
             "revenueMonthly": revenue_bundle["months"],
