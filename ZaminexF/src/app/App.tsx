@@ -905,31 +905,18 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     setPropertiesLoading(true);
     setPropertiesError(null);
     try {
-      // The property list caps page_size at 100 (Phase 1 guard), so the
-      // comboboxes' "every visible property" data is paged through in
-      // 100-row steps. no-store: a cached copy would resurface rows that
-      // were just deleted.
-      const all: Property[] = [];
-      let page = 1;
-      let total = Infinity;
-      while (all.length < total) {
-        const res = await apiFetch(
-          `/properties/api/properties/?page=${page}&page_size=100`,
-          { method: "GET", cache: "no-store" },
-          initialData.csrfToken
-        );
-        if (!res.ok) throw new Error("خطا در دریافت لیست املاک");
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          all.push(...data);
-          break;
-        }
-        const items = data.results ?? [];
-        total = data.count ?? items.length;
-        all.push(...items);
-        if (items.length < 100) break;
-        page += 1;
-      }
+      // The comboboxes need every visible property but only a handful of
+      // columns from each, so they read the compact `options` projection in a
+      // single request instead of paging the full list endpoint in 100-row
+      // steps. no-store: a cached copy would resurface rows that were just
+      // deleted.
+      const res = await apiFetch(
+        "/properties/api/properties/options/",
+        { method: "GET", cache: "no-store" },
+        initialData.csrfToken
+      );
+      if (!res.ok) throw new Error("خطا در دریافت لیست املاک");
+      const all: Property[] = await res.json();
       setProperties(all);
       return all;
     } catch (error: any) {

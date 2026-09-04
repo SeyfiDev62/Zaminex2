@@ -140,36 +140,22 @@ function PropertyMapPicker({
   // All located properties, drawn as consultant-coloured markers so the
   // user can see the surroundings (and avoid registering on top of another
   // property — the backend rejects exact duplicates as well).
-  // Phase 1: the list caps page_size at 100, so the "every located property"
-  // data is paged through in 100-row steps (same pattern as the combobox
-  // fetch in App.tsx).
+  // Read from the compact `options` projection in one request (same pattern
+  // as the combobox fetch in App.tsx) — it carries exactly the columns the
+  // markers below use, so there is no need to page the full list endpoint.
   const [located, setLocated] = useState<LocatedProperty[]>([]);
   useEffect(() => {
     if (!csrfToken) return;
     let cancelled = false;
     (async () => {
-      const rows: any[] = [];
-      let page = 1;
-      let total = Infinity;
+      let rows: any[] = [];
       try {
-        while (rows.length < total) {
-          const res = await apiFetch(
-            `/properties/api/properties/?scope=all&page=${page}&page_size=100`,
-            { method: "GET" },
-            csrfToken
-          );
-          if (!res.ok) break;
-          const data = await res.json();
-          if (Array.isArray(data)) {
-            rows.push(...data);
-            break;
-          }
-          const items = data.results ?? [];
-          total = data.count ?? items.length;
-          rows.push(...items);
-          if (items.length < 100) break;
-          page += 1;
-        }
+        const res = await apiFetch(
+          "/properties/api/properties/options/?scope=all",
+          { method: "GET" },
+          csrfToken
+        );
+        if (res.ok) rows = await res.json();
       } catch {
         // surrounding properties are context only — never block the form.
       }
