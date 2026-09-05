@@ -613,7 +613,7 @@ class PropertyPdfFontFailureTests(TestCase):
     """A missing/corrupt font is a clean 500 with a Persian detail — never an
     empty PDF."""
 
-    FONT_REL = Path("static") / "fonts" / "ttf" / "IRAN Rounded.ttf"
+    FONT_REL = Path("static") / "fonts" / "ttf" / "IRAN-Rounded.ttf"
 
     @classmethod
     def setUpClass(cls):

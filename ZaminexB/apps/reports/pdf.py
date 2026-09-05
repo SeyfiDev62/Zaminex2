@@ -193,7 +193,7 @@ def _register_font() -> None:
     global _font_registered
     if _font_registered:
         return
-    path = Path(settings.BASE_DIR) / "static" / "fonts" / "ttf" / "IRAN Rounded.ttf"
+    path = Path(settings.BASE_DIR) / "static" / "fonts" / "ttf" / "IRAN-Rounded.ttf"
     try:
         # Cheap structural pre-check: a font corrupted on checkout (git text
         # handling CRLF-converts the bytes, a bad clone truncates the file)
