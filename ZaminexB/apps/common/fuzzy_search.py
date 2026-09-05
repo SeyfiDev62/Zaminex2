@@ -29,6 +29,7 @@ Persian normalization and typo tolerance.
 
 import difflib
 import unicodedata
+from functools import lru_cache
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import connection
@@ -317,6 +318,61 @@ def _index_expression(field: str):
     return Upper(_stripped_field(field))
 
 
+@lru_cache(maxsize=16384)
+def _token_ratio(a: str, b: str) -> float:
+    """``SequenceMatcher(a, b).ratio()``, memoised and length pre-filtered.
+
+    The portable fallback is the only place typos are detected without
+    pg_trgm, and it asks this one question once per (query token, field
+    token) pair per row per column — 76,250 calls to score 5,000 properties,
+    which measured as 63% of the whole search. Two things make that almost
+    entirely wasted work:
+
+    * ``ratio`` is a pure function of its two arguments, and a property table
+      repeats the same handful of words («آپارتمان», «تهران», «خواب») in every
+      row, so the number of *distinct* pairs is a small fraction of the pairs
+      actually compared;
+    * ``ratio`` is ``2 * M / (len(a) + len(b))`` and ``M`` can never exceed the
+      shorter string, so whenever ``2 * min(len) < 0.70 * total`` the pair
+      cannot reach the caller's 0.70 cutoff. That is decided by arithmetic
+      instead of by the quadratic matcher.
+
+    Both are behaviour-preserving: the caller only ever reads ratios at or
+    above 0.70, and the pre-filter can only short-circuit pairs below it.
+    """
+    total = len(a) + len(b)
+    if total and 2 * min(len(a), len(b)) < 0.70 * total:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _score_ordering(scored):
+    """Order matched rows by descending score, one ``CASE`` branch per score.
+
+    ``scored`` arrives sorted by descending score, so grouping equal scores
+    keeps the branches in rank order.
+
+    The previous form emitted one ``WHEN "id" = %s THEN %s`` branch per
+    matched row: at 5,000 matches that compiled to a 0.23 MB statement with
+    15,000 bind parameters, and building it cost a third of the entire search
+    before a single row was read. Rows sharing a score are indistinguishable
+    to the ranking by definition, so they now share a branch and fall back to
+    the deterministic ``-id`` tiebreak the caller adds — which also matches
+    the "equal relevance falls back to newest first" rule this module already
+    applies on the PostgreSQL path.
+    """
+    buckets = {}
+    for position, (_, score) in enumerate(scored):
+        buckets.setdefault(score, []).append(position)
+    return Case(
+        *[
+            When(pk__in=[scored[position][0] for position in positions], then=rank)
+            for rank, positions in enumerate(buckets.values())
+        ],
+        output_field=IntegerField(),
+    )
+
+
 def apply_fuzzy_search(queryset, query, fields, threshold=FUZZY_SEARCH_THRESHOLD):
     """Restrict ``queryset`` to rows matching ``query`` on ``fields``.
 
@@ -496,7 +552,7 @@ def apply_fuzzy_search(queryset, query, fields, threshold=FUZZY_SEARCH_THRESHOLD
                 v_tokens = norm_val.split()
                 for q_tok in q_tokens:
                     for v_tok in v_tokens:
-                        seq_ratio = difflib.SequenceMatcher(None, q_tok, v_tok).ratio()
+                        seq_ratio = _token_ratio(q_tok, v_tok)
                         if seq_ratio >= 0.70:
                             max_score = max(max_score, seq_ratio)
 
@@ -509,8 +565,6 @@ def apply_fuzzy_search(queryset, query, fields, threshold=FUZZY_SEARCH_THRESHOLD
         scored.sort(key=lambda x: x[1], reverse=True)
         matched_pks = [pk for pk, _ in scored]
 
-        ordering = Case(
-            *[When(pk=pk, then=pos) for pos, pk in enumerate(matched_pks)],
-            output_field=IntegerField(),
+        return queryset.filter(pk__in=matched_pks).order_by(
+            _score_ordering(scored), "-id"
         )
-        return queryset.filter(pk__in=matched_pks).order_by(ordering)
