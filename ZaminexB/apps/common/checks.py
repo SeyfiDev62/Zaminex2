@@ -90,3 +90,86 @@ def check_frontend_assets(app_configs, **kwargs):
             id="vite_assets.E002",
         )
     ]
+
+
+@register()
+def check_pg_trgm(app_configs, **kwargs):
+    """Warn when fuzzy search is running without a usable pg_trgm.
+
+    ``apply_fuzzy_search`` falls back to a pure-Python scan when pg_trgm
+    cannot score Persian text. That fallback is correct — the results are the
+    same — but it reads the whole table and scores it in Python, so it is the
+    difference between a 40 ms search and a 20 second one. Nothing surfaces
+    it: the site works, the results are right, and no exception is raised.
+
+    Two very different causes need two very different fixes, so the probe
+    tells them apart rather than reporting one undifferentiated "search is
+    slow":
+
+    * **extension missing** — the database predates ``common.0006``, which is
+      exactly what a database restored from an old dump looks like. Fixed by
+      running the pending migrations.
+    * **extension present but unusable** — the database's LC_CTYPE is the
+      plain "C" locale, where pg_trgm classifies every non-ASCII letter as
+      non-alphanumeric and ``show_trgm('آپارتمان')`` returns ``{}``. No amount
+      of migrating fixes this; the database has to be recreated with a
+      UTF-8 locale.
+
+    Deliberately a warning rather than an error: a slow search is not a broken
+    site, and a check that blocks ``migrate`` would prevent running the very
+    migration that fixes the first case.
+    """
+    from django.db import connection
+
+    if getattr(connection, "vendor", "") != "postgresql":
+        return []
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
+            )
+            installed = cursor.fetchone() is not None
+            if not installed:
+                return [
+                    Warning(
+                        "The pg_trgm extension is not installed on this "
+                        "database, so fuzzy search runs the slow Python "
+                        "fallback instead of using trigram indexes.",
+                        hint=(
+                            "Run the pending migrations (python manage.py "
+                            "migrate), or have a superuser run "
+                            "'CREATE EXTENSION pg_trgm;' on this database."
+                        ),
+                        id="pg_trgm.W001",
+                    )
+                ]
+            # Installed is not the same as usable: probe the same way
+            # apply_fuzzy_search decides which path to take.
+            cursor.execute("SELECT show_trgm(%s)", ["آپارتمان"])
+            row = cursor.fetchone()
+            usable = bool(row and row[0])
+    except Exception:
+        # No database yet (first migrate), no permission to read the
+        # catalogue, or a connection that is simply not up. None of those is
+        # this check's business, and a check must never be what stops a deploy.
+        return []
+
+    if usable:
+        return []
+
+    return [
+        Warning(
+            "pg_trgm is installed but cannot tokenize Persian text on this "
+            "database, so fuzzy search runs the slow Python fallback. The "
+            "database's LC_CTYPE is almost certainly the plain 'C' locale, "
+            "where every non-ASCII letter counts as a word separator and "
+            "show_trgm('آپارتمان') returns an empty array.",
+            hint=(
+                "Recreate the database with a UTF-8 locale (for example "
+                "CREATE DATABASE ... TEMPLATE template0 LC_CTYPE 'C.UTF-8') "
+                "and restore the data into it. Migrations cannot fix this."
+            ),
+            id="pg_trgm.W002",
+        )
+    ]
