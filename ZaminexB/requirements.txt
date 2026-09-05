@@ -39,6 +39,19 @@ python-bidi==0.6.11
 # Uses PostgreSQL pg_trgm (TrigramSimilarity) and Django postgres search
 # for native, field-by-field fuzzy matching with Persian normalization.
 
+# --- WSGI server -----------------------------------------------------------
+# `manage.py runserver` is not a production server: it is single-threaded,
+# has no process supervision, and says so on every start. Nothing in this
+# file previously provided an alternative, so a deployment had no documented
+# way to serve the app at all.
+#
+# Gunicorn serves `config.wsgi:application` — the same entry point that also
+# installs the static file handler (see apps/common/staticfiles.py), which is
+# what makes `/static/` work with DEBUG off:
+#
+#   gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4
+gunicorn==26.2.0
+
 # --- Cache (Phase 2) -------------------------------------------------------
 # Redis-backed cache when REDIS_URL is set; the app falls back to in-process
 # LocMem without it (Redis is an optimisation, never a dependency —
