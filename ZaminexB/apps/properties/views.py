@@ -29,6 +29,7 @@ from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
 from apps.common.access import can_access_property, can_manage_property
+from apps.common.cache_invalidation import invalidate_property_caches
 from .validators import validate_appraisal_pdf, validate_property_image
 
 from .serializers import (
@@ -291,6 +292,85 @@ class PropertyViewSet(viewsets.ModelViewSet):
         """
         return Response({"internalCode": _generate_next_internal_code()})
 
+    @action(detail=False, methods=["get"], url_path="options")
+    def options(self, request):
+        """A compact projection of every property the caller may see.
+
+        The property comboboxes (فیلتر لیست آگهی‌ها، ایجاد آگهی، ایجاد پیگیری)
+        and the map picker all need *every* visible property but only a
+        handful of columns from each. They used to page through the full
+        list endpoint in 100-row steps to get them — 54 requests and 4 MB
+        at 5,400 properties, with the list serializer computing
+        ``property_market_metrics`` for every row that was then thrown
+        away.
+
+        The role scoping and the ``scope=all`` / filter query params are
+        inherited from :meth:`get_queryset`, so access levels here are
+        exactly the list endpoint's. The prefetches are dropped because
+        ``.values()`` reads plain columns and never touches the related
+        objects those prefetches were loading.
+
+        Deliberately not paginated: a combobox cannot offer an option it
+        has not loaded, and paging it was the original problem.
+        """
+        # ``consultant__first_name`` etc. are read as columns rather than
+        # through select_related for the same reason.
+        rows = list(
+            self.get_queryset()
+            .prefetch_related(None)
+            .values(
+                "id",
+                "title",
+                "internal_code",
+                "neighborhood",
+                "status",
+                "area",
+                "latitude",
+                "longitude",
+                "price",
+                "consultant_id",
+                "consultant__first_name",
+                "consultant__last_name",
+                "consultant__username",
+            )
+        )
+        # One grouped query for the whole batch. ``effective_sale_price``
+        # would otherwise read each property's listings one row at a time.
+        prices = annotate_effective_prices([row["id"] for row in rows])
+
+        options = []
+        for row in rows:
+            price = prices.get(row["id"], row["price"])
+            full_name = " ".join(
+                part
+                for part in (
+                    row["consultant__first_name"],
+                    row["consultant__last_name"],
+                )
+                if part
+            ).strip()
+            options.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "internalCode": row["internal_code"],
+                    "district": row["neighborhood"],
+                    # str() to match PropertySerializer.get_price exactly.
+                    "price": str(price) if price is not None else None,
+                    "propertyStatus": (row["status"] or "").lower(),
+                    "area": row["area"],
+                    "latitude": row["latitude"],
+                    "longitude": row["longitude"],
+                    "consultantId": row["consultant_id"],
+                    "consultantName": (
+                        (full_name or row["consultant__username"] or "نامشخص")
+                        if row["consultant_id"]
+                        else "نامشخص"
+                    ),
+                }
+            )
+        return Response(options)
+
     @action(detail=True, methods=["post"], url_path="toggle-shared")
     def toggle_shared(self, request, pk=None):
         """Toggle the is_shared flag. Admin-only."""
@@ -366,6 +446,7 @@ class PropertyViewSet(viewsets.ModelViewSet):
                 {"detail": "فرمت ورودی نامعتبر است. لیستی از {id, sort_order} انتظار می‌رود."},
                 status=400,
             )
+        changed = 0
         for item in order_data:
             img_id = item.get("id")
             sort_order = item.get("sort_order")
@@ -374,6 +455,15 @@ class PropertyViewSet(viewsets.ModelViewSet):
             PropertyImage.objects.filter(
                 pk=img_id, property=property_obj
             ).update(sort_order=sort_order)
+            changed += 1
+
+        # ``QuerySet.update`` emits no ``post_save``, so the Phase-4 receivers
+        # never see these writes and the cached property report would linger
+        # until its TTL. Drop the keys explicitly, exactly as the reference-data
+        # reorder in apps/basics/views.py does. Fail-open: the helper swallows
+        # cache errors and the TTL is the backstop either way.
+        if changed:
+            invalidate_property_caches(property_obj)
         images = PropertyImage.objects.filter(
             property=property_obj
         ).order_by("sort_order", "id")

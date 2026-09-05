@@ -290,6 +290,44 @@ class MediaAuthTests(TestCase):
         self.assertEqual(allowed.status_code, 403)
 
 
+class MediaRootConfigurationTests(TestCase):
+    """Uploads must live somewhere a deploy cannot delete.
+
+    A media tree that is wiped after the upload leaves the database row behind,
+    so every download of it answers 404 forever — which is why the location is
+    configurable instead of hard-coded inside the checkout.
+    """
+
+    def test_media_root_is_absolute_and_exists(self):
+        root = Path(settings.MEDIA_ROOT)
+        self.assertTrue(root.is_absolute(), settings.MEDIA_ROOT)
+        self.assertTrue(root.is_dir(), settings.MEDIA_ROOT)
+
+    def test_environment_value_wins_and_is_never_cwd_relative(self):
+        from config.settings import BASE_DIR, _resolve_media_root
+
+        self.assertEqual(
+            _resolve_media_root("/var/lib/zaminex/media", BASE_DIR),
+            Path("/var/lib/zaminex/media"),
+        )
+        # A relative value is anchored to the project directory, not to wherever
+        # the server process happened to be started from.
+        self.assertEqual(
+            _resolve_media_root("media-store", BASE_DIR),
+            (BASE_DIR / "media-store").resolve(),
+        )
+
+    def test_default_stays_inside_the_project_for_plain_checkouts(self):
+        """No MEDIA_ROOT in the environment => the classic in-repo tree."""
+
+        import os
+
+        from config.settings import BASE_DIR
+
+        if not os.environ.get("MEDIA_ROOT", "").strip():
+            self.assertEqual(Path(settings.MEDIA_ROOT), BASE_DIR / "media")
+
+
 class PublicEndpointTests(TestCase):
     def test_login_stats_remain_public(self):
         resp = self.client.get("/common/api/login-stats/")

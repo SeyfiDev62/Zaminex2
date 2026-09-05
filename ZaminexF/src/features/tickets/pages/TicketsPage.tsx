@@ -15,7 +15,7 @@ import type {
 import { apiErrorMessage, apiFetch, readJson } from "../../../shared/lib/apiClient";
 import { cx } from "../../../shared/lib/utils";
 import { formatJalaliDT } from "../../../shared/lib/jdate";
-import { toast } from "../../../shared/lib/utils";
+import { toast, saveBlob } from "../../../shared/lib/utils";
 import { Badge } from "../../../shared/components/ui/Badge";
 import { Btn } from "../../../shared/components/ui/Btn";
 import { Card } from "../../../shared/components/ui/Card";
@@ -1050,12 +1050,7 @@ function TicketListPage({
         throw new Error(apiErrorMessage(data, "دریافت خروجی انجام نشد."));
       }
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = "tickets.csv";
-      anchor.click();
-      URL.revokeObjectURL(url);
+      saveBlob(blob, "tickets.csv");
     } catch (err: unknown) {
       toast({ type: "error", message: err instanceof Error ? err.message : "دریافت خروجی انجام نشد." });
     }

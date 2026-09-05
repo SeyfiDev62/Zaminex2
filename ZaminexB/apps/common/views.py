@@ -3,7 +3,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .throttles import PasswordResetRateThrottle
+from .throttles import PasswordResetRateThrottle, ResilientScopedRateThrottle
 
 from .models import CompanySettings
 from .serializers import CompanySettingsSerializer
@@ -250,3 +250,69 @@ class AdminPasswordChangeView(APIView):
         )
         
         return Response({"success": True, "message": "رمز عبور با موفقیت تغییر کرد"})
+
+
+# ---------------------------------------------------------------------------
+#  Geocoding proxy
+# ---------------------------------------------------------------------------
+
+
+class GeocodeView(APIView):
+    """Resolve a Persian place name to coordinates on behalf of the map picker.
+
+    ``GET /common/api/geocode/?q=…[&viewbox=w,n,e,s][&bounded=1]``
+
+    The browser talks only to this endpoint, so the app's CSP needs no
+    third-party host in ``connect-src`` and the upstream (public Nominatim, or
+    a self-hosted one via ``GEOCODE_UPSTREAM``) is called from a single place
+    that caches, paces itself and sends a descriptive ``User-Agent``.
+
+    Response contract — the two failure modes are deliberately distinct, so
+    the UI can tell "this place does not exist" from "the geocoder is down":
+
+    * ``200`` + ``[]``      — the upstream answered; nothing matched.
+    * ``200`` + ``[{…}]``   — hits, Nominatim-shaped plus a stable ``lat``/``lon``.
+    * ``503``               — the upstream could not be reached or answered badly.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ResilientScopedRateThrottle]
+    throttle_scope = "geocode"
+
+    def get(self, request):
+        from django.conf import settings
+
+        from .geocode import GeocodeUnavailable, clean_viewbox, geocode
+
+        query = (request.query_params.get("q") or "").strip()
+        max_length = int(getattr(settings, "GEOCODE_MAX_QUERY_LENGTH", 200))
+        if not query:
+            return Response(
+                {"detail": "عبارت جستجوی مکان نمی‌تواند خالی باشد."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(query) > max_length:
+            return Response(
+                {"detail": f"عبارت جستجو نباید بیشتر از {max_length} نویسه باشد."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        viewbox = clean_viewbox(request.query_params.get("viewbox"))
+        if request.query_params.get("viewbox") and viewbox is None:
+            return Response(
+                {"detail": "محدودهٔ جغرافیایی معتبر نیست."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        bounded = request.query_params.get("bounded") in {"1", "true", "yes"}
+
+        try:
+            results = geocode(query, viewbox, bounded)
+        except GeocodeUnavailable:
+            # Not a client error: the place may well exist. The message must
+            # say the *service* is unavailable, otherwise the operator keeps
+            # re-typing an address that was never looked up.
+            return Response(
+                {"detail": "سرویس جستجوی مکان در دسترس نیست؛ کمی دیگر دوباره تلاش کنید."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(results)

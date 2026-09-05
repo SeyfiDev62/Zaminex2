@@ -25,10 +25,14 @@ Phase 2 is infrastructure only — no consumer is wired to this module yet
 from __future__ import annotations
 
 import json
+import logging
+import threading
 import time
 from contextlib import contextmanager
 from decimal import Decimal
 from typing import Any, Callable, Iterator
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CACHE_VERSION",
@@ -36,8 +40,12 @@ __all__ = [
     "cache_get",
     "cache_set",
     "cache_delete",
+    "cache_add",
     "cache_or_compute",
     "with_lock",
+    "backend_reports_delivery",
+    "note_cache_delivered",
+    "cache_backend_available",
 ]
 
 # Bump when the shape of a cached payload changes: readers then miss on the
@@ -106,6 +114,134 @@ def _cache():
     return cache
 
 
+# ---------------------------------------------------------------------------
+# Backend availability tracking
+# ---------------------------------------------------------------------------
+# ``IGNORE_EXCEPTIONS`` makes django-redis swallow connection errors, so a
+# dead or hung backend is *invisible to a read*: ``cache.get(key, default)``
+# returns the default whether the key is simply missing or the backend is
+# gone. Callers that must tell "empty" apart from "unavailable" (throttling
+# is the important one) therefore need a second signal.
+#
+# A *write* is not invisible. django-redis returns ``True`` when the value
+# landed and ``None`` when ``omit_exception`` swallowed the error, so the
+# return value of ``cache.set`` is the one bit of truth we get. It is
+# recorded here, with a cooldown: while the backend is marked down, callers
+# should serve from their own degraded path instead of paying a socket
+# timeout on every operation, and after the cooldown expires the next real
+# write probes it again (a half-open circuit breaker).
+#
+# Django's own backends (LocMem/Dummy/FileBased) return ``None`` from
+# ``set()`` on *success*, so the signal only means something for the
+# django-redis backend — which is also the only one that can fail silently,
+# the others being in-process or on the local filesystem.
+# ---------------------------------------------------------------------------
+
+# How long a backend stays marked down before the next write probes it again:
+# long enough to avoid paying the timeout on every request during an outage,
+# short enough to notice recovery promptly.
+BACKEND_REPROBE_SECONDS = 5.0
+
+# Which backend the recorded state refers to. A failure observed against one
+# backend says nothing about another, and ``override_settings(CACHES=…)``
+# swaps backends under a running process (the test suite does this), so the
+# state is dropped whenever the configured backend changes.
+_backend_key: str | None = None
+_backend_reports_delivery = False
+_backend_marked_down = False
+_backend_down_until = 0.0
+_backend_state_lock = threading.Lock()
+
+
+def _sync_backend() -> None:
+    """Re-read the configured backend and drop stale state if it changed."""
+    global _backend_key, _backend_reports_delivery, _backend_marked_down
+    global _backend_down_until
+    from django.conf import settings
+
+    backend = settings.CACHES.get("default", {}).get("BACKEND", "")
+    if backend == _backend_key:
+        return
+    with _backend_state_lock:
+        _backend_key = backend
+        _backend_reports_delivery = "django_redis" in backend
+        _backend_marked_down = False
+        _backend_down_until = 0.0
+
+
+def backend_reports_delivery() -> bool:
+    """Whether the configured backend signals a swallowed error as ``None``.
+
+    Only the django-redis backend does; the rest of Django's return ``None``
+    from ``set()`` on *success* and cannot fail silently, so the tracking
+    below is inert for them.
+    """
+    _sync_backend()
+    return _backend_reports_delivery
+
+
+def note_cache_delivered(delivered: Any) -> None:
+    """Record the outcome of a cache write.
+
+    ``delivered`` is the raw return value of ``cache.set``: truthy means the
+    value landed, falsy means the backend swallowed an error. A no-op for
+    backends whose ``set`` cannot report failure.
+
+    State transitions are logged, once each, so an outage is a single
+    greppable line rather than something inferred from a stream of
+    ``django_redis`` tracebacks (which ``DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS``
+    emits for the underlying error).
+    """
+    if not backend_reports_delivery():
+        return
+    global _backend_marked_down, _backend_down_until
+    now = time.monotonic()
+    with _backend_state_lock:
+        was_marked_down = _backend_marked_down
+        if delivered:
+            _backend_marked_down = False
+            _backend_down_until = 0.0
+        else:
+            # ``marked_down`` stays set across the cooldown so the warning
+            # fires once per outage rather than once per failed write.
+            _backend_marked_down = True
+            _backend_down_until = now + BACKEND_REPROBE_SECONDS
+    if delivered:
+        if was_marked_down:
+            logger.info("Cache backend is delivering writes again.")
+    elif not was_marked_down:
+        logger.warning(
+            "Cache backend is not delivering writes — serving degraded for "
+            "%.1fs before re-probing. Underlying error is logged by "
+            "django_redis.cache.",
+            BACKEND_REPROBE_SECONDS,
+        )
+
+
+def cache_backend_available() -> bool:
+    """Whether the shared cache is believed to be working right now.
+
+    ``True`` is "no failure recorded, or the re-probe cooldown has elapsed" —
+    not a guarantee: the next real operation is what actually probes the
+    backend, and a backend that is still down is re-marked immediately.
+    """
+    _sync_backend()
+    if not _backend_marked_down:
+        return True
+    return time.monotonic() >= _backend_down_until
+
+
+def reset_backend_availability() -> None:
+    """Clear the recorded backend state (tests and health probes)."""
+    global _backend_key, _backend_reports_delivery, _backend_marked_down
+    global _backend_down_until
+    with _backend_state_lock:
+        _backend_key = None
+        _backend_reports_delivery = False
+        _backend_marked_down = False
+        _backend_down_until = 0.0
+
+
 def make_key(domain: str, *parts: Any) -> str:
     """Build a versioned key: ``zaminex:v1:<domain>:<part1>:<part2>:...``
 
@@ -123,7 +259,13 @@ def make_key(domain: str, *parts: Any) -> str:
 
 
 def cache_get(key: str) -> Any:
-    """Fail-open read: any backend error (or corrupt payload) is a miss."""
+    """Fail-open read: any backend error (or corrupt payload) is a miss.
+
+    While the backend is marked down this returns a miss without touching
+    it, so a hung Redis costs nothing instead of a socket timeout per call.
+    """
+    if not cache_backend_available():
+        return None
     try:
         return _decode(_cache().get(key))
     except Exception:
@@ -133,25 +275,73 @@ def cache_get(key: str) -> Any:
 def cache_set(key: str, value: Any, timeout: int | float | None) -> bool:
     """Fail-open write.
 
-    Returns ``False`` only when the backend raised; ``True`` means no error
-    was observed. (Backends differ in what ``set`` returns on success —
-    LocMem returns ``None``, django-redis ``True`` — and a fail-open backend
-    swallows its own errors, so the return value is "no error", not a
-    delivery guarantee.)
+    Returns ``False`` when the backend raised or is currently marked down,
+    and ``True`` when no error was observed. It is not a delivery guarantee:
+    the *first* write of an outage is swallowed by ``IGNORE_EXCEPTIONS``
+    rather than raised, so it reports ``True`` and it is that call which
+    opens the breaker for the ones after it. (Backends also differ in what
+    ``set`` returns on success — LocMem ``None``, django-redis ``True`` — so
+    the raw value cannot be used as the contract either way.)
+
+    The outcome is also what feeds the availability tracker: django-redis
+    returns ``None`` when ``IGNORE_EXCEPTIONS`` swallowed an error, and that
+    is the only signal a silent failure leaves behind.
     """
-    try:
-        _cache().set(key, _encode(value), timeout)
-        return True
-    except Exception:
+    if not cache_backend_available():
         return False
+    try:
+        delivered = _cache().set(key, _encode(value), timeout)
+    except Exception:
+        note_cache_delivered(None)
+        return False
+    note_cache_delivered(delivered)
+    return True
 
 
 def cache_delete(key: str) -> None:
-    """Fail-open delete."""
+    """Fail-open delete (skipped while the backend is marked down)."""
+    if not cache_backend_available():
+        return
     try:
         _cache().delete(key)
     except Exception:
         pass
+
+
+def cache_add(key: str, value: Any, timeout: int | float | None) -> bool | None:
+    """Atomic set-if-absent (``SET NX EX`` via ``cache.add``), fail-open.
+
+    Three outcomes, and callers must handle all three:
+
+    * ``True``  — the key did not exist; we created it, so we won.
+    * ``False`` — the key already existed; somebody else won.
+    * ``None``  — **unknown**: the backend is down or ``IGNORE_EXCEPTIONS``
+      swallowed an error, so nobody knows who won.
+
+    ``None`` is the trap. django-redis's ``add`` is decorated with
+    ``@omit_exception`` (``return_value=None``), so a dead backend returns
+    ``None``, not ``False`` — testing ``if not cache_add(...)`` would treat
+    an outage as "someone else holds it" and make every caller wait out its
+    full deadline. Callers that use this as a one-per-window gate must test
+    ``is not False`` and fail open.
+
+    The three-way result is also what makes this the right primitive for
+    both the per-key compute lock and the geocoder's rate window: they need
+    the same atomicity, and a read-then-write race is what this replaces.
+
+    The value is encoded exactly as :func:`cache_set` encodes it, so a value
+    stored with ``cache_add`` reads back correctly through :func:`cache_get`.
+    """
+    if not cache_backend_available():
+        return None
+    try:
+        acquired = _cache().add(key, _encode(value), timeout)
+    except Exception:
+        acquired = None
+    # ``add`` returning ``False`` means the backend *answered* (the key was
+    # already there); only ``None`` means the failure was swallowed.
+    note_cache_delivered(acquired is not None)
+    return acquired
 
 
 def cache_or_compute(
@@ -191,10 +381,7 @@ def cache_or_compute(
         return value
 
     lock_key = key + _LOCK_SUFFIX
-    try:
-        won = _cache().add(lock_key, "1", _LOCK_TIMEOUT)
-    except Exception:
-        won = None  # unknown → fail fast, compute locally
+    won = cache_add(lock_key, "1", _LOCK_TIMEOUT)
 
     if won is False:
         deadline = time.monotonic() + _LOCK_MAX_WAIT
@@ -214,6 +401,8 @@ def cache_or_compute(
 
 
 def _lock_gone(key: str) -> bool:
+    if not cache_backend_available():
+        return True
     try:
         return _cache().get(key) is None
     except Exception:
@@ -249,10 +438,7 @@ def with_lock(
     ``wait`` bounds how long a waiter blocks before proceeding in parallel
     (graceful degradation: an extra computation, never a stalled request).
     """
-    try:
-        acquired = _cache().add(key, "1", timeout)
-    except Exception:
-        acquired = None
+    acquired = cache_add(key, "1", timeout)
     owned = acquired is True
     if acquired is False:
         deadline = time.monotonic() + wait

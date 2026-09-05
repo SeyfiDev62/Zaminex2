@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (
     AttributeViewSet,
+    AttributeCategoryViewSet,
     BasicsCatalogView,
     CityViewSet,
     DistrictViewSet,
@@ -25,6 +26,11 @@ router.register(r"property-usages", PropertyUsageViewSet, basename="property-usa
 router.register(r"property-types", PropertyTypeViewSet, basename="property-type")
 router.register(r"deal-types", DealTypeViewSet, basename="deal-type")
 router.register(r"attributes", AttributeViewSet, basename="attribute")
+router.register(
+    r"attribute-categories",
+    AttributeCategoryViewSet,
+    basename="attribute-category",
+)
 router.register(
     r"property-type-attributes",
     PropertyTypeAttributeViewSet,

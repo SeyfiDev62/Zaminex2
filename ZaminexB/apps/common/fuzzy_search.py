@@ -29,6 +29,7 @@ Persian normalization and typo tolerance.
 
 import difflib
 import unicodedata
+from functools import lru_cache
 
 from django.core.exceptions import FieldDoesNotExist
 from django.db import connection
@@ -37,6 +38,7 @@ from django.db.models import (
     BigAutoField,
     BigIntegerField,
     Case,
+    CharField,
     DecimalField,
     F,
     FloatField,
@@ -46,10 +48,12 @@ from django.db.models import (
     Q,
     SmallAutoField,
     SmallIntegerField,
+    TextField,
     Value,
     When,
 )
-from django.db.models.functions import Greatest, Replace
+from django.db.models.functions import Greatest, Replace, Upper
+from django.db.models.lookups import Lookup
 
 _NUMERIC_FIELD_TYPES = (
     AutoField,
@@ -230,6 +234,60 @@ class _WordMatchSimilarity(Func):
     output_field = FloatField()
 
 
+class _ReversedWordSimilarGate(Lookup):
+    """``query <% field`` — the index-usable form of the scoring expression.
+
+    ``<%`` is the word-similarity predicate PostgreSQL can answer from a GIN
+    trigram index (it plans as a Bitmap Index Scan on the field's index), and it
+    reads its cut-off from the session GUC
+    ``pg_trgm.word_similarity_threshold`` (see :func:`_set_trgm_gate`).
+
+    Operand order matters and is easy to get wrong here. ``%>`` is the
+    commutator of ``<%``, so ``query %> field`` scores
+    ``word_similarity(field, query)`` — the operands the wrong way round for
+    what search means, and against a long field it scores near zero, which
+    silently drops every row. ``<%`` scores ``word_similarity(query, field)``,
+    matching :class:`_WordMatchSimilarity` exactly.
+    """
+
+    lookup_name = "word_similar_gate"
+
+    def as_sql(self, compiler, connection):
+        lhs, lhs_params = self.process_lhs(compiler, connection)
+        rhs, rhs_params = self.process_rhs(compiler, connection)
+        # ``<%%`` because psycopg treats a bare ``%`` in the statement as a
+        # parameter placeholder — Django's own trigram lookups escape it the
+        # same way.
+        return f"{rhs} <%% {lhs}", [*rhs_params, *lhs_params]
+
+
+for _field_class in (CharField, TextField):
+    _field_class.register_lookup(_ReversedWordSimilarGate)
+
+
+def _set_trgm_gate(threshold: float) -> float:
+    """Lower the trigram operator thresholds to just under ``threshold``.
+
+    The ``%`` / ``%>`` operators compare against session GUCs, not against an
+    argument, so they can only act as a *candidate gate* for the real
+    ``score >= threshold`` filter if their cut-off sits below it. One hundredth
+    lower is enough to make the gate a strict superset (the operators are
+    ``>``, the score filter is ``>=``), which is what keeps the gate from
+    silently dropping a row the score would have kept.
+
+    ``set_config(..., false)`` sets it for the session; it is idempotent, costs
+    a round trip, and nothing else in this project uses the trigram operators.
+    """
+    gate = max(0.05, round(threshold - 0.01, 4))
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT set_config('pg_trgm.word_similarity_threshold', %s, false),"
+            "       set_config('pg_trgm.similarity_threshold', %s, false)",
+            [str(gate), str(gate)],
+        )
+    return gate
+
+
 def _stripped_field(field: str):
     """The field expression with ZWNJ removed.
 
@@ -238,7 +296,81 @@ def _stripped_field(field: str):
     through («خواب» then matches «خواهم»). Comparing against the
     ZWNJ-stripped text restores the true word.
     """
-    return Replace(F(field), Value("\u200c"), Value(""))
+    # ``output_field`` is required now that this expression is annotated
+    # directly: the searched columns mix CharField (title, internal_code,
+    # neighbourhood) with TextField (address, description), and Django cannot
+    # resolve a mixed-type expression on its own. TextField is the safe common
+    # type — every use here is text comparison or trigram scoring.
+    return Replace(F(field), Value("\u200c"), Value(""), output_field=TextField())
+
+
+def _index_expression(field: str):
+    """The exact expression the trigram indexes are built on.
+
+    Both branches of the search have to resolve to this one expression or the
+    GIN index cannot serve them: the substring branch already lands on it,
+    because Django compiles ``__icontains`` on ``Replace(field, ZWNJ, '')``
+    into ``upper(replace(field::text, '‌', '')) LIKE upper(...)``, and the
+    similarity branch is written against it explicitly. ``upper()`` is the
+    identity for Persian text, so scoring is unchanged; it only matters for
+    the ASCII identifiers, where the column is already upper case.
+    """
+    return Upper(_stripped_field(field))
+
+
+@lru_cache(maxsize=16384)
+def _token_ratio(a: str, b: str) -> float:
+    """``SequenceMatcher(a, b).ratio()``, memoised and length pre-filtered.
+
+    The portable fallback is the only place typos are detected without
+    pg_trgm, and it asks this one question once per (query token, field
+    token) pair per row per column — 76,250 calls to score 5,000 properties,
+    which measured as 63% of the whole search. Two things make that almost
+    entirely wasted work:
+
+    * ``ratio`` is a pure function of its two arguments, and a property table
+      repeats the same handful of words («آپارتمان», «تهران», «خواب») in every
+      row, so the number of *distinct* pairs is a small fraction of the pairs
+      actually compared;
+    * ``ratio`` is ``2 * M / (len(a) + len(b))`` and ``M`` can never exceed the
+      shorter string, so whenever ``2 * min(len) < 0.70 * total`` the pair
+      cannot reach the caller's 0.70 cutoff. That is decided by arithmetic
+      instead of by the quadratic matcher.
+
+    Both are behaviour-preserving: the caller only ever reads ratios at or
+    above 0.70, and the pre-filter can only short-circuit pairs below it.
+    """
+    total = len(a) + len(b)
+    if total and 2 * min(len(a), len(b)) < 0.70 * total:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def _score_ordering(scored):
+    """Order matched rows by descending score, one ``CASE`` branch per score.
+
+    ``scored`` arrives sorted by descending score, so grouping equal scores
+    keeps the branches in rank order.
+
+    The previous form emitted one ``WHEN "id" = %s THEN %s`` branch per
+    matched row: at 5,000 matches that compiled to a 0.23 MB statement with
+    15,000 bind parameters, and building it cost a third of the entire search
+    before a single row was read. Rows sharing a score are indistinguishable
+    to the ranking by definition, so they now share a branch and fall back to
+    the deterministic ``-id`` tiebreak the caller adds — which also matches
+    the "equal relevance falls back to newest first" rule this module already
+    applies on the PostgreSQL path.
+    """
+    buckets = {}
+    for position, (_, score) in enumerate(scored):
+        buckets.setdefault(score, []).append(position)
+    return Case(
+        *[
+            When(pk__in=[scored[position][0] for position in positions], then=rank)
+            for rank, positions in enumerate(buckets.values())
+        ],
+        output_field=IntegerField(),
+    )
 
 
 def apply_fuzzy_search(queryset, query, fields, threshold=FUZZY_SEARCH_THRESHOLD):
@@ -279,31 +411,86 @@ def apply_fuzzy_search(queryset, query, fields, threshold=FUZZY_SEARCH_THRESHOLD
         #     against the field (plain similarity) — «اپارتمان لوکس» matches
         #     «فروش آپارتمان لوکس», while «آپارتمان تست صفحه» does not leak
         #     into «آپارتمان دو خواب» or «اپارتمان».
-        if " " in normalized_query:
-            from django.contrib.postgres.search import TrigramSimilarity
-
-            sim_exprs = [
-                # similarity() is symmetric, so the field-first argument
-                # order of Django's class is fine here.
-                TrigramSimilarity(_stripped_field(field), normalized_query)
-                for field in text_fields
-            ]
-        else:
-            sim_exprs = [
-                _WordMatchSimilarity(Value(normalized_query), _stripped_field(field))
-                for field in text_fields
-            ]
-        max_sim_expr = sim_exprs[0] if len(sim_exprs) == 1 else Greatest(*sim_exprs)
-
-        qs = queryset.annotate(_search_sim=max_sim_expr)
-
         min_thresh = (
             threshold
             if isinstance(threshold, float) and 0 < threshold <= 1.0
             else FUZZY_SEARCH_THRESHOLD
         )
+        multi_word = " " in normalized_query
 
-        qs = qs.filter(base_q | Q(_search_sim__gte=min_thresh))
+        # One annotation per searched column, holding exactly the expression the
+        # GIN indexes cover. Both the substring branch and the similarity gate
+        # are written against that single alias, which is what lets one index
+        # serve both — and what lets PostgreSQL plan a BitmapOr instead of a
+        # sequential scan. Using ``__contains``/``__startswith`` rather than the
+        # ``i`` variants is deliberate: the alias is already upper-cased, so
+        # ``icontains`` would wrap it in a second ``upper()`` and stop matching
+        # the index expression.
+        qs = queryset
+        aliases = {}
+        for position, field in enumerate(text_fields + code_fields):
+            alias = f"_stripped{position}"
+            aliases[field] = alias
+            qs = qs.annotate(**{alias: _index_expression(field)})
+
+        if multi_word:
+            from django.contrib.postgres.search import TrigramSimilarity
+
+            sim_exprs = [
+                # similarity() is symmetric, so the field-first argument
+                # order of Django's class is fine here.
+                TrigramSimilarity(_index_expression(field), normalized_query)
+                for field in text_fields
+            ]
+        else:
+            sim_exprs = [
+                _WordMatchSimilarity(
+                    Value(normalized_query), _index_expression(field)
+                )
+                for field in text_fields
+            ]
+        max_sim_expr = sim_exprs[0] if len(sim_exprs) == 1 else Greatest(*sim_exprs)
+        qs = qs.annotate(_search_sim=max_sim_expr)
+
+        # Index-usable candidate gate. Every predicate in this Q can be answered
+        # from an index, so PostgreSQL narrows with a BitmapOr and only scores
+        # what survives. Previously the score filter sat inside the same OR as
+        # everything else, which forced a sequential scan — measured at a flat
+        # 8 ms per 1,000 rows on every search, i.e. linear in the whole table.
+        _set_trgm_gate(min_thresh)
+        gate_q = Q()
+        for field in text_fields:
+            alias = aliases[field]
+            if multi_word:
+                gate_q |= Q(**{f"{alias}__trigram_similar": normalized_query})
+            else:
+                gate_q |= Q(**{f"{alias}__word_similar_gate": normalized_query})
+
+        def _exact_match_q(search_text):
+            # ``upper()`` on the pattern because the alias is upper-cased; for
+            # Persian text it is the identity, and for the ASCII identifiers it
+            # reproduces what ``icontains``/``istartswith`` did before.
+            pattern = str(search_text).upper()
+            q = Q()
+            for field in text_fields:
+                q |= Q(**{f"{aliases[field]}__contains": pattern})
+            for field in code_fields:
+                q |= Q(**{f"{aliases[field]}__startswith": pattern})
+            if str(search_text).isdigit():
+                as_int = int(search_text)
+                for field in numeric_fields:
+                    q |= Q(**{field: as_int})
+            return q
+
+        exact_q = _exact_match_q(normalized_query)
+        if query != normalized_query:
+            exact_q |= _exact_match_q(query)
+
+        qs = qs.filter(exact_q | gate_q)
+        # Re-apply the precise predicate to the narrowed set. The gate is a
+        # superset by construction, so the rows returned are exactly the ones
+        # the previous single-pass filter produced.
+        qs = qs.filter(exact_q | Q(_search_sim__gte=min_thresh))
         # Deterministic tie-breaker: equal relevance scores order by newest
         # id first, so pagination can never skip or repeat rows.
         return qs.order_by("-_search_sim", "-id")
@@ -365,7 +552,7 @@ def apply_fuzzy_search(queryset, query, fields, threshold=FUZZY_SEARCH_THRESHOLD
                 v_tokens = norm_val.split()
                 for q_tok in q_tokens:
                     for v_tok in v_tokens:
-                        seq_ratio = difflib.SequenceMatcher(None, q_tok, v_tok).ratio()
+                        seq_ratio = _token_ratio(q_tok, v_tok)
                         if seq_ratio >= 0.70:
                             max_score = max(max_score, seq_ratio)
 
@@ -378,8 +565,6 @@ def apply_fuzzy_search(queryset, query, fields, threshold=FUZZY_SEARCH_THRESHOLD
         scored.sort(key=lambda x: x[1], reverse=True)
         matched_pks = [pk for pk, _ in scored]
 
-        ordering = Case(
-            *[When(pk=pk, then=pos) for pos, pk in enumerate(matched_pks)],
-            output_field=IntegerField(),
+        return queryset.filter(pk__in=matched_pks).order_by(
+            _score_ordering(scored), "-id"
         )
-        return queryset.filter(pk__in=matched_pks).order_by(ordering)

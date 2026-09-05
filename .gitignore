@@ -8,3 +8,36 @@ ZaminexF/node_modules/
 ZaminexF/dist/
 .venv/
 __venv__/
+
+# User uploads. Only the seed images that ship with the repository are tracked;
+# anything uploaded at runtime must stay out of version control. This is what
+# keeps a deploy that resets the working tree (`git clean -fd`, `git checkout
+# -f`) from deleting uploaded files: git clean skips ignored paths, and a
+# deleted file leaves its database row behind, so every download of it then
+# answers 404 «فایل یافت نشد.» — the ticket-attachment bug. Add a new seed
+# image deliberately with `git add -f`. For a disposable checkout, point the
+# MEDIA_ROOT environment variable at a persistent path instead (see
+# ZaminexB/config/settings.py).
+ZaminexB/media/
+
+# Built frontend assets. `npm run build` writes the hashed JS/CSS *and* the
+# Vite manifest that names them into this directory as one atomic step, so
+# tracking them in git is what makes them able to come apart: a partial
+# `git reset` / `checkout` / `stash` can revert the manifest while leaving the
+# freshly built assets, and the page then references files that do not exist.
+# Because both templates render only an empty <div id="root"> that src/main.tsx
+# fills, that failure is a blank page with no exception and no 500 anywhere,
+# and `collectstatic` exits 0 because it only copies files that exist. Keeping
+# the pair out of version control removes the second copy that could disagree.
+# Consequence: building the frontend is part of deploying, not of committing —
+# run `cd ZaminexF && npm ci && npm run build` on the server. The system check
+# apps.common.checks turns a missing or inconsistent build into a hard error
+# when DEBUG is off, so this can never ship silently.
+ZaminexB/static/frontend/
+
+# STATIC_ROOT: the directory `collectstatic` copies everything into for a
+# production deploy. It is generated output derived entirely from tracked
+# sources, so committing it would mean two copies that can disagree — and
+# every `collectstatic` run would leave 160 untracked files in `git status`,
+# which is exactly how a real change gets missed among the noise.
+ZaminexB/staticfiles/

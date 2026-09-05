@@ -25,6 +25,7 @@ silently bypassed by ``bulk_create`` / ``update``.
 from __future__ import annotations
 
 from django.db import models
+from django.db.models.signals import post_delete
 from django.utils import timezone
 
 
@@ -44,12 +45,40 @@ class SoftDeleteQuerySet(models.QuerySet):
         return self.filter(deleted_at__isnull=True, is_active=True)
 
     def delete(self):
-        """Soft-delete the whole queryset in a single UPDATE."""
-        return self.update(
-            deleted_at=timezone.now(),
+        """Soft-delete the whole queryset in a single UPDATE.
+
+        ``QuerySet.update`` sends no signals, so on its own a bulk soft delete
+        is invisible to the receivers that keep the caches honest
+        (``apps/basics/apps.py`` and ``apps/common/cache_invalidation.py``) and
+        stale entries would live out their TTL. Stock Django's
+        ``QuerySet.delete`` does send them, so this does too: the rows that
+        are actually transitioning are fetched first and ``post_delete`` is
+        sent for each.
+
+        Only rows that were still alive are signalled — re-announcing an
+        already-deleted row would be noise for every receiver. The extra
+        SELECT is skipped entirely when nothing is listening, so models with
+        no ``post_delete`` receiver keep the single-statement cost.
+
+        Signals go out before the surrounding transaction commits, exactly as
+        Django's own collector does; receivers must not assume the row is
+        gone, which is true of a soft delete in any case.
+        """
+        now = timezone.now()
+        listeners = post_delete.has_listeners(self.model)
+        instances = list(self.filter(deleted_at__isnull=True)) if listeners else []
+        updated = self.update(
+            deleted_at=now,
             is_active=False,
-            updated_at=timezone.now(),
+            updated_at=now,
         )
+        for instance in instances:
+            # Make the payload truthful: a receiver sees the row as deleted,
+            # not in the state it had before the UPDATE.
+            instance.deleted_at = now
+            instance.is_active = False
+            post_delete.send(sender=self.model, instance=instance)
+        return updated
 
     def hard_delete(self):
         """Permanently remove the rows (escape hatch, mainly for tests)."""

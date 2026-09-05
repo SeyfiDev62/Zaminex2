@@ -6,12 +6,12 @@ import datetime
 from decimal import Decimal
 from typing import Any
 
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.utils import timezone
 
 from apps.followups.models import FollowUp, FollowUpStatus
 from apps.listings.models import Listing
-from apps.properties.models import Property
+from apps.properties.models import Property, PropertyImage
 from apps.tasks.models import Task
 
 # Rough bounding box for Iran (reject (0,0) and obvious junk).
@@ -544,9 +544,54 @@ def is_burned_listing(listing: Listing) -> bool:
     return False
 
 
-def generated_high_prob_leads_for_listing(listing: Listing) -> int:
+def high_prob_leads_by_property(property_ids) -> dict[int, int]:
+    """High-probability follow-up counts for many properties in one query.
+
+    ``generated_high_prob_leads_for_listing`` runs a ``COUNT`` per listing, and
+    the analytics endpoints call it for every row — twice, once for the row and
+    once for the channel summary. At 100k listings that is 200k queries. This
+    is the batched equivalent; callers that walk a list should build the map
+    once and pass it down.
+    """
+    ids = [pid for pid in dict.fromkeys(property_ids) if pid]
+    if not ids:
+        return {}
+    rows = (
+        FollowUp.objects.filter(
+            property_id__in=ids,
+            is_archived=False,
+            probability__gte=HIGH_PROBABILITY_THRESHOLD,
+        )
+        .values("property_id")
+        .annotate(total=Count("id"))
+    )
+    return {row["property_id"]: row["total"] for row in rows}
+
+
+def images_count_by_property(property_ids) -> dict[int, int]:
+    """Image counts for many properties in one grouped query.
+
+    The batched counterpart of :func:`images_count_for_property`, for callers
+    walking a list of listings whose property relations are not prefetched.
+    """
+    ids = [pid for pid in dict.fromkeys(property_ids) if pid]
+    if not ids:
+        return {}
+    rows = (
+        PropertyImage.objects.filter(property_id__in=ids)
+        .values("property_id")
+        .annotate(total=Count("id"))
+    )
+    return {row["property_id"]: row["total"] for row in rows}
+
+
+def generated_high_prob_leads_for_listing(
+    listing: Listing, high_prob_leads: dict[int, int] | None = None
+) -> int:
     if not listing.property_id:
         return 0
+    if high_prob_leads is not None:
+        return high_prob_leads.get(listing.property_id, 0)
     return (
         FollowUp.objects.filter(
             property_id=listing.property_id,
@@ -587,7 +632,9 @@ def content_richness_score(listing: Listing, images_count: int | None = None) ->
     return min(score, 5)
 
 
-def listing_marketing_metrics(listing: Listing) -> dict[str, Any]:
+def listing_marketing_metrics(
+    listing: Listing, high_prob_leads: dict[int, int] | None = None
+) -> dict[str, Any]:
     prop = listing.property
     img_count = images_count_for_property(prop) if prop else 0
     richness = content_richness_score(listing, img_count)
@@ -598,17 +645,36 @@ def listing_marketing_metrics(listing: Listing) -> dict[str, Any]:
         "effectiveExposureDays": effective_exposure_days(listing),
         "delegationIndicator": delegation_indicator(listing),
         "isBurnedListing": is_burned_listing(listing),
-        "generatedHighProbLeads": generated_high_prob_leads_for_listing(listing),
+        "generatedHighProbLeads": generated_high_prob_leads_for_listing(
+            listing, high_prob_leads
+        ),
         "contentRichnessScore": richness,
         "engagementHeatScore": heat,
     }
 
 
-def channel_marketing_summary(listings: list[Listing]) -> list[dict[str, Any]]:
-    """Aggregate metrics per publish channel."""
+def channel_marketing_summary(
+    listings: list[Listing],
+    high_prob_leads: dict[int, int] | None = None,
+    images_counts: dict[int, int] | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate metrics per publish channel.
+
+    ``high_prob_leads`` and ``images_counts`` are the batched lookups from
+    :func:`high_prob_leads_by_property` and :func:`images_count_by_property`.
+    Pass them when walking a large list: without them each row costs a
+    follow-up COUNT and an image COUNT of its own.
+    """
     by_channel: dict[str, list[Listing]] = {}
     for lst in listings:
         by_channel.setdefault(lst.publish_channel or "OTHER", []).append(lst)
+
+    def _richness(lst: Listing) -> int:
+        if images_counts is None:
+            return content_richness_score(lst)
+        return content_richness_score(
+            lst, images_counts.get(lst.property_id, 0) if lst.property_id else 0
+        )
 
     rows = []
     for channel, items in sorted(by_channel.items()):
@@ -617,7 +683,9 @@ def channel_marketing_summary(listings: list[Listing]) -> list[dict[str, Any]]:
         burned = sum(1 for x in items if is_burned_listing(x))
         total = len(items)
         burn_rate = round(burned / total, 4) if total else None
-        high_prob = sum(generated_high_prob_leads_for_listing(x) for x in items)
+        high_prob = sum(
+            generated_high_prob_leads_for_listing(x, high_prob_leads) for x in items
+        )
         rows.append(
             {
                 "publishChannel": channel,
@@ -626,7 +694,7 @@ def channel_marketing_summary(listings: list[Listing]) -> list[dict[str, Any]]:
                 "listingBurnRate": burn_rate,
                 "generatedHighProbLeads": high_prob,
                 "avgContentRichness": round(
-                    sum(content_richness_score(x) for x in items) / total, 2
+                    sum(_richness(x) for x in items) / total, 2
                 )
                 if total
                 else None,

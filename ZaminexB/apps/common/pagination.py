@@ -183,8 +183,10 @@ class LargeListPagination(StandardResultsSetPagination):
     """Deliberate opt-in for endpoints whose consumers legitimately need
     the whole table in one response (currently: follow-ups — the
     dashboard's "upcoming" widget reads the full small table to order
-    overdue-then-recent). Keep it that way: the large tables (properties,
-    listings) must stay behind the 100-row guard of the base class.
+    overdue-then-recent — and tasks, whose board and calendar screens run
+    their status/priority/assignee filters over the loaded set in the
+    browser). Keep it that way: the large tables (properties, listings)
+    must stay behind the 100-row guard of the base class.
     Inherits the Phase-5 count cache.
     """
 

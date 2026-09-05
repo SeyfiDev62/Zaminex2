@@ -233,7 +233,45 @@ LOGOUT_REDIRECT_URL = "/accounts/login/"
 
 # Task 4: media settings
 MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "media"
+
+
+def _resolve_media_root(value: str, base: Path) -> Path:
+    """Turn the optional ``MEDIA_ROOT`` environment value into a real path.
+
+    A relative value is resolved against the project directory, never against
+    the process working directory, so the upload tree cannot silently move when
+    the server is started from another folder.
+    """
+
+    candidate = Path(value).expanduser()
+    return candidate if candidate.is_absolute() else (base / candidate).resolve()
+
+
+# Uploads have to outlive the code that points at them.
+#
+# The default keeps the tree inside the checkout so a plain clone works with no
+# configuration at all. A deployment that resets its working tree, however —
+# ``git clean -fd``, ``git checkout -f``, a fresh clone, a rebuilt container
+# image — then deletes every uploaded file while its database row survives, and
+# the download endpoint answers 404 «فایل یافت نشد.» forever after. That is
+# exactly the "پیوست تیکت دانلود نمی‌شود" bug. ``.gitignore`` already keeps the
+# upload tree out of version control so ``git clean -fd`` skips it; point
+# MEDIA_ROOT at a persistent path outside the repository as well when the
+# checkout itself is disposable:
+#
+#     export MEDIA_ROOT=/var/lib/zaminex/media
+#
+_env_media_root = os.environ.get("MEDIA_ROOT", "").strip()
+MEDIA_ROOT = (
+    _resolve_media_root(_env_media_root, BASE_DIR)
+    if _env_media_root
+    else BASE_DIR / "media"
+)
+
+# Created eagerly so a freshly mounted volume accepts the first upload instead
+# of failing with FileNotFoundError, and a mis-typed path surfaces at start-up
+# rather than at somebody's first download.
+os.makedirs(MEDIA_ROOT, exist_ok=True)
 
 # Account-scoped login protection: 5 failed attempts in 15 minutes => 10-minute lock.
 LOGIN_FAILURE_LIMIT = 5
@@ -285,12 +323,23 @@ def _cache_settings():
                     # payloads, DRF throttle counters), so the JSON
                     # serializer is lossless for this app.
                     "SERIALIZER": "django_redis.serializers.json.JSONSerializer",
-                    # Fail-open: swallow backend errors as misses.
+                    # Fail-open: swallow backend errors as misses. The
+                    # errors are still recorded — see
+                    # DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS below; failing
+                    # open must not also mean failing silently.
                     "IGNORE_EXCEPTIONS": True,
                     # A hung Redis must not stall requests: bound the connect
-                    # and read windows tightly.
-                    "SOCKET_CONNECT_TIMEOUT": 0.5,
-                    "SOCKET_TIMEOUT": 0.5,
+                    # and read windows tightly. The cost is per operation, not
+                    # per request — a warm request makes 5 cache round trips
+                    # and a cold one up to 9 — so this value is the multiplier
+                    # on the worst case. Measured against a Redis that accepts
+                    # the connection and never replies:
+                    #     0.5s → 4,529 ms per cold request
+                    #     0.1s →   928 ms per cold request
+                    # Local Redis answers in well under a millisecond, so
+                    # 0.1s is ~100x headroom and still fails fast.
+                    "SOCKET_CONNECT_TIMEOUT": 0.1,
+                    "SOCKET_TIMEOUT": 0.1,
                 },
             }
         }
@@ -304,6 +353,52 @@ def _cache_settings():
 
 CACHES = _cache_settings()
 
+# django-redis reads this as a top-level setting, not from OPTIONS. Without
+# it ``IGNORE_EXCEPTIONS`` swallows every backend error in silence: a dead or
+# hung Redis showed up only as slow responses and (before the throttle
+# fallback in apps/common/throttles.py) as rate limits quietly switching
+# themselves off — no 500, no warning, nothing to grep for. The underlying
+# exception is what distinguishes "connection refused" from "read timed out"
+# from "OOM command not allowed", so it is worth the log volume during an
+# outage; apps.common.cache_utils additionally logs a single, unambiguous
+# warning each time the backend transitions to down.
+DJANGO_REDIS_LOG_IGNORED_EXCEPTIONS = True
+
+# ---------------------------------------------------------------------------
+#  Geocoding (map place search)
+# ---------------------------------------------------------------------------
+# The map picker no longer calls a public geocoder from the browser: that was
+# blocked by the app's own Content-Security-Policy and could neither be cached
+# nor rate-limited. Requests now go to /common/api/geocode/ and leave the
+# server from a single place (apps/common/geocode.py).
+#
+# GEOCODE_UPSTREAM is an environment variable rather than a constant so a
+# self-hosted Nominatim can be swapped in with no code change — which is also
+# what makes a deployment with no internet access possible.
+GEOCODE_UPSTREAM = os.environ.get(
+    "GEOCODE_UPSTREAM", "https://nominatim.openstreetmap.org/search"
+).strip()
+# Identify ourselves: the public Nominatim instance's usage policy requires a
+# descriptive User-Agent, and an anonymous client is the first to be throttled.
+GEOCODE_USER_AGENT = os.environ.get(
+    "GEOCODE_USER_AGENT",
+    "Zaminex-CRM/1.0 (+self-hosted real-estate CRM; geocode proxy)",
+).strip()
+# Kept short on purpose: a geocode lookup is interactive, and a hung upstream
+# must not hold a request open the way the AI call (60 s) legitimately does.
+GEOCODE_TIMEOUT = float(os.environ.get("GEOCODE_TIMEOUT", "8"))
+GEOCODE_MAX_QUERY_LENGTH = 200
+GEOCODE_LIMIT = 1
+# The public instance allows ~1 request/second per client. Paced server-side
+# through the shared cache, so the budget is global across workers when Redis
+# is present and per-process otherwise.
+GEOCODE_PACING_SECONDS = float(os.environ.get("GEOCODE_PACING_SECONDS", "1.1"))
+# A place's coordinates are effectively permanent, so a hit is cached for a
+# month; a miss far less, because OpenStreetMap's coverage improves and a
+# stale "not found" must not outlive the fix.
+GEOCODE_CACHE_TTL = 30 * 24 * 3600
+GEOCODE_NEGATIVE_CACHE_TTL = 7 * 24 * 3600
+
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "apps.common.exceptions.persian_exception_handler",
     "DEFAULT_PERMISSION_CLASSES": [
@@ -313,20 +408,31 @@ REST_FRAMEWORK = {
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
-        "rest_framework.throttling.ScopedRateThrottle",
+        # Resilient wrappers: the stock DRF classes read their history with
+        # ``cache.get(key, [])``, which with IGNORE_EXCEPTIONS cannot tell an
+        # empty counter from a dead backend — so a Redis outage would turn
+        # every rate limit off. See apps/common/throttles.py.
+        "apps.common.throttles.ResilientAnonRateThrottle",
+        "apps.common.throttles.ResilientUserRateThrottle",
+        "apps.common.throttles.ResilientScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
+        # These two apply to every DRF view: DEFAULT_THROTTLE_CLASSES above
+        # contains the anon and user limiters, and a view that does not
+        # declare its own throttle_classes inherits them. So an endpoint with
+        # no explicit scope is not unthrottled — it is covered here.
         "anon": "60/min",
         "user": "300/min",
-        # Sensitive endpoints: a tighter scope prevents brute-forcing or
-        # runaway AI / CSV export costs.
+        # Tighter per-endpoint scopes. Each one is only in force on a view
+        # that names it via `throttle_scope`; a rate declared here with no
+        # such view protects nothing while reading like it does, which is
+        # worse than not declaring it. (test_throttles.py walks the URLconf
+        # and fails if one goes unused.)
         "password_reset": "5/hour",
-        "login": "10/min",
         "ai": "10/hour",
-        "export": "10/hour",
-        "file_upload": "20/min",
+        # A geocode lookup fans out into up to three upstream calls (the query
+        # ladder), so this is generous for a human but still bounds a runaway.
+        "geocode": "60/min",
     },
 }
 
@@ -366,7 +472,16 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = False
 #     degrades transparently to the plain DB engine — no 500s on login,
 #     requests or logout (the store also wraps its own cache calls).
 # No migration: cached_db uses the same django_session table.
-SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+#
+# The subclass adds one thing: it skips the cache while cache_utils has
+# marked the backend down. Fail-open already made an outage *correct* here,
+# but not *cheap* — with SESSION_SAVE_EVERY_REQUEST on, every authenticated
+# request still paid two socket timeouts on a hung Redis. Skipping them
+# degrades to the plain DB engine immediately instead. See
+# apps/common/session_backend.py.
+# SESSION_ENGINE names the *module* — Django imports it and uses its
+# ``SessionStore`` attribute, the same contract the stock engines follow.
+SESSION_ENGINE = "apps.common.session_backend"
 # CSRF cookie must be readable by JS to set the X-CSRFToken header from the
 # SPA; keep it scoped to the same site and HttpOnly off (this is standard
 # for a session-authenticated SPA).

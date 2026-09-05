@@ -11,3 +11,5 @@ class CommonConfig(AppConfig):
         # (The module is idempotently self-registering; the import here is
         # the canonical hook so every entry point gets the receivers.)
         import apps.common.cache_invalidation  # noqa: F401
+        # System checks self-register on import; same pattern.
+        from apps.common import checks  # noqa: F401

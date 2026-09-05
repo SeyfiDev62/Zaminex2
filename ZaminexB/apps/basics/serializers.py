@@ -16,6 +16,7 @@ from rest_framework import serializers
 
 from .models import (
     Attribute,
+    AttributeCategory,
     AttributeOption,
     DealType,
     DealTypeAttribute,
@@ -28,6 +29,54 @@ from .models import (
     PropertyTypeSearchAttribute,
     PropertyUsage,
 )
+
+
+# ---------------------------------------------------------------------------
+#  Shared helper
+# ---------------------------------------------------------------------------
+
+class SystemKeyFromLabelMixin:
+    """Derive the system key (``name``) before per-field validation runs.
+
+    The management UI only asks for the Persian label — inventing an English
+    key is not something an operator should have to do. ``validate()`` is the
+    natural place to fill it in, but it runs *after* every field has been
+    validated: if ``name`` is ever treated as required, the request is already
+    rejected with a bare "این مقدار لازم است." that names a field the form does
+    not even show, and the autofill is never reached.
+
+    Supplying the key here — in ``to_internal_value``, before field validation
+    — makes the contract robust regardless of how ``name`` is declared, so the
+    label the operator typed is always enough to create a row.
+    """
+
+    #: Model field that scopes uniqueness (``province`` for a city, ``city``
+    #: for a district). ``None`` means the key is unique table-wide.
+    system_key_scope: str | None = None
+
+    def to_internal_value(self, data):
+        # Only on create: an existing row keeps its key, which may already be
+        # referenced elsewhere.
+        if self.instance is None and not (data or {}).get("name"):
+            label = (data or {}).get("displayName") or ""
+            scope = {}
+            scope_field = self.system_key_scope
+            if scope_field:
+                raw = (data or {}).get(scope_field)
+                # Resolve the parent only when it is a usable id; an invalid or
+                # missing parent is reported by the field itself, in Persian.
+                if raw not in (None, ""):
+                    model_field = self.fields.get(scope_field)
+                    queryset = getattr(model_field, "queryset", None)
+                    if queryset is not None:
+                        parent = queryset.filter(pk=raw).first()
+                        if parent is not None:
+                            scope[scope_field] = parent
+
+            data = dict(data)
+            data["name"] = _unique_system_key(self.Meta.model, label, scope)
+
+        return super().to_internal_value(data)
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +140,92 @@ class AttributeOptionSerializer(serializers.ModelSerializer):
 #  Attributes
 # ---------------------------------------------------------------------------
 
+class AttributeCategorySerializer(SystemKeyFromLabelMixin, serializers.ModelSerializer):
+    """A bucket attributes are filed under (the «دسته‌بندی ویژگی‌ها» tab).
+
+    ``attributeCount`` and ``isSystem`` are read-only extras the management
+    screen needs: the first drives the badge next to each heading and decides
+    whether the group can be removed, the second explains why the two built-in
+    groups refuse to be deleted.
+    """
+
+    displayName = serializers.CharField(source="display_name")
+    sortOrder = serializers.DecimalField(
+        source="sort_order", max_digits=10, decimal_places=2, required=False
+    )
+    isActive = serializers.BooleanField(source="is_active", required=False)
+    attributeCount = serializers.SerializerMethodField()
+    isSystem = serializers.BooleanField(source="is_system_category", read_only=True)
+    # Optional on create: derived from the Persian label, the same way the
+    # geography endpoints do it.
+    name = serializers.CharField(required=False)
+
+    class Meta:
+        model = AttributeCategory
+        fields = [
+            "id", "name", "displayName", "sortOrder", "isActive",
+            "attributeCount", "isSystem",
+        ]
+
+    def get_attributeCount(self, obj) -> int:
+        return obj.attribute_count()
+
+    def validate_name(self, value):
+        """`name` is a stable key: unique among live rows and immutable.
+
+        It is what ``Attribute.category`` stores, so renaming it would leave
+        every attribute already filed under the old key pointing at a category
+        that no longer exists — the attribute would silently disappear from the
+        «دسته‌بندی ویژگی‌ها» screen. Mirrors ``AttributeSerializer.validate_name``.
+        """
+        value = (value or "").strip()
+        if not value:
+            raise serializers.ValidationError("کلید سیستمی نمی‌تواند خالی باشد.")
+
+        if self.instance and self.instance.name != value:
+            raise serializers.ValidationError(
+                "کلید سیستمی پس از ایجاد قابل تغییر نیست؛ نام نمایشی را ویرایش کنید."
+            )
+
+        clash = AttributeCategory.objects.filter(name=value)
+        if self.instance:
+            clash = clash.exclude(pk=self.instance.pk)
+        if clash.exists():
+            raise serializers.ValidationError("این کلید سیستمی قبلاً ثبت شده است.")
+        return value
+
+    def validate(self, attrs):
+        """Reject a duplicate label, then derive the system key when omitted.
+
+        The label check is spelled out here rather than left to
+        ``_fill_name_from_display``'s generic «در این محدوده» wording: there is
+        no parent scope on a category, so the operator should be told plainly
+        that a category with this exact name already exists.
+
+        Only checked when the label is actually being set — a partial update
+        that flips ``isActive`` carries no ``display_name`` and must not be
+        rejected for it.
+        """
+        if "display_name" in attrs:
+            label = (attrs.get("display_name") or "").strip()
+            if not label:
+                raise serializers.ValidationError(
+                    {"displayName": "نام دسته‌بندی نمی‌تواند خالی باشد."}
+                )
+
+            clash = AttributeCategory.objects.filter(display_name=label)
+            if self.instance is not None:
+                clash = clash.exclude(pk=self.instance.pk)
+            if clash.exists():
+                raise serializers.ValidationError(
+                    {"displayName": f"دسته‌بندی «{label}» قبلاً ثبت شده است."}
+                )
+
+            attrs["display_name"] = label
+
+        return _fill_name_from_display(self, attrs, AttributeCategory)
+
+
 class AttributeSerializer(serializers.ModelSerializer):
     """Full attribute representation used by the management screens."""
 
@@ -114,6 +249,13 @@ class AttributeSerializer(serializers.ModelSerializer):
     # Optional on create: derived from the Persian label, the same way the
     # geography endpoints do it.
     name = serializers.CharField(required=False)
+    # Declared explicitly rather than inherited, so that choosing nothing is
+    # reported in this project's own words by ``validate_category`` instead of
+    # DRF's generic «این مقدار نباید خالی باشد.» — an inherited CharField would
+    # reject the empty string first (``allow_blank=False``) and the message
+    # below would never be reached. Still optional: a caller that omits the key
+    # entirely keeps the model default, which is what pre-dates categories.
+    category = serializers.CharField(allow_blank=True, required=False)
 
     class Meta:
         model = Attribute
@@ -147,6 +289,32 @@ class AttributeSerializer(serializers.ModelSerializer):
         if clash.exists():
             raise serializers.ValidationError("این کلید سیستمی قبلاً ثبت شده است.")
         return value
+
+    def validate_category(self, value):
+        """The category must be one the administrator has actually defined.
+
+        ``Attribute.category`` stores a plain system key rather than a foreign
+        key (see :class:`AttributeCategory`), so nothing at the database level
+        stops a caller from filing an attribute under a category that does not
+        exist. That would make the attribute vanish from the «دسته‌بندی
+        ویژگی‌ها» screen, which renders the categories and files each attribute
+        under its key.
+
+        This check is what upholds the invariant that screen relies on: a
+        category may only be removed while it is empty (enforced in
+        ``AttributeCategoryViewSet.perform_destroy``), so a stored key always
+        resolves and no attribute is ever left without a category.
+        """
+        key = (value or "").strip()
+        if not key:
+            raise serializers.ValidationError("انتخاب دسته‌بندی الزامی است.")
+
+        category = AttributeCategory.objects.filter(name=key).first()
+        if category is None:
+            raise serializers.ValidationError(
+                "دسته‌بندی انتخاب‌شده وجود ندارد یا حذف شده است."
+            )
+        return category.name
 
     def validate(self, attrs):
         """Derive the key when omitted, then block edits that orphan data.
@@ -453,50 +621,6 @@ class SearchFilterSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------------
 #  Geography
 # ---------------------------------------------------------------------------
-
-class SystemKeyFromLabelMixin:
-    """Derive the system key (``name``) before per-field validation runs.
-
-    The management UI only asks for the Persian label — inventing an English
-    key is not something an operator should have to do. ``validate()`` is the
-    natural place to fill it in, but it runs *after* every field has been
-    validated: if ``name`` is ever treated as required, the request is already
-    rejected with a bare "این مقدار لازم است." that names a field the form does
-    not even show, and the autofill is never reached.
-
-    Supplying the key here — in ``to_internal_value``, before field validation
-    — makes the contract robust regardless of how ``name`` is declared, so the
-    label the operator typed is always enough to create a row.
-    """
-
-    #: Model field that scopes uniqueness (``province`` for a city, ``city``
-    #: for a district). ``None`` means the key is unique table-wide.
-    system_key_scope: str | None = None
-
-    def to_internal_value(self, data):
-        # Only on create: an existing row keeps its key, which may already be
-        # referenced elsewhere.
-        if self.instance is None and not (data or {}).get("name"):
-            label = (data or {}).get("displayName") or ""
-            scope = {}
-            scope_field = self.system_key_scope
-            if scope_field:
-                raw = (data or {}).get(scope_field)
-                # Resolve the parent only when it is a usable id; an invalid or
-                # missing parent is reported by the field itself, in Persian.
-                if raw not in (None, ""):
-                    model_field = self.fields.get(scope_field)
-                    queryset = getattr(model_field, "queryset", None)
-                    if queryset is not None:
-                        parent = queryset.filter(pk=raw).first()
-                        if parent is not None:
-                            scope[scope_field] = parent
-
-            data = dict(data)
-            data["name"] = _unique_system_key(self.Meta.model, label, scope)
-
-        return super().to_internal_value(data)
-
 
 class ProvinceSerializer(SystemKeyFromLabelMixin, serializers.ModelSerializer):
     displayName = serializers.CharField(source="display_name")

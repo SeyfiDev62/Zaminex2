@@ -905,31 +905,18 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
     setPropertiesLoading(true);
     setPropertiesError(null);
     try {
-      // The property list caps page_size at 100 (Phase 1 guard), so the
-      // comboboxes' "every visible property" data is paged through in
-      // 100-row steps. no-store: a cached copy would resurface rows that
-      // were just deleted.
-      const all: Property[] = [];
-      let page = 1;
-      let total = Infinity;
-      while (all.length < total) {
-        const res = await apiFetch(
-          `/properties/api/properties/?page=${page}&page_size=100`,
-          { method: "GET", cache: "no-store" },
-          initialData.csrfToken
-        );
-        if (!res.ok) throw new Error("خطا در دریافت لیست املاک");
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          all.push(...data);
-          break;
-        }
-        const items = data.results ?? [];
-        total = data.count ?? items.length;
-        all.push(...items);
-        if (items.length < 100) break;
-        page += 1;
-      }
+      // The comboboxes need every visible property but only a handful of
+      // columns from each, so they read the compact `options` projection in a
+      // single request instead of paging the full list endpoint in 100-row
+      // steps. no-store: a cached copy would resurface rows that were just
+      // deleted.
+      const res = await apiFetch(
+        "/properties/api/properties/options/",
+        { method: "GET", cache: "no-store" },
+        initialData.csrfToken
+      );
+      if (!res.ok) throw new Error("خطا در دریافت لیست املاک");
+      const all: Property[] = await res.json();
       setProperties(all);
       return all;
     } catch (error: any) {
@@ -941,10 +928,35 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
   }, [initialData.csrfToken]);
 
   // The list tabs (properties / my-properties / all-properties) paginate on
-  // the server themselves; this fetch serves the pages that still need the
-  // full visible list for comboboxes (wizards, follow-ups, filters).
+  // the server themselves; this fetch serves every page that still needs the
+  // full visible list client-side — the property comboboxes (add-listing /
+  // follow-up wizards, the listings filter, the tasks board) and the admin
+  // dashboard's property sections. Before this, only a handful of pages ever
+  // triggered the fetch, so the same components on every other page rendered
+  // against an empty array and showed no properties at all.
+  //
+  // Access is untouched: fetchProperties hits the role-scoped list endpoint
+  // (admin sees everything, a consultant sees own + shared) and never sends
+  // scope=all, so a consultant's comboboxes only ever offer what they may see.
   useEffect(() => {
-    if (page !== "add-property" && page !== "edit-property" && page !== "create-followup" && page !== "edit-followup" && page !== "follow-ups") return;
+    const needsVisibleProperties = new Set([
+      "admin-dashboard",
+      "properties",
+      "add-property",
+      "edit-property",
+      "listings",
+      "my-listings",
+      "create-listing",
+      "edit-listing",
+      "tasks-kanban",
+      "create-task",
+      "tasks-calendar",
+      "follow-ups",
+      "my-followups",
+      "create-followup",
+      "edit-followup",
+    ]);
+    if (!needsVisibleProperties.has(page)) return;
     fetchProperties();
   }, [page, fetchProperties]);
 
@@ -1450,7 +1462,7 @@ export default function AppRouter({ initialData }: { initialData: InitialData })
   const renderPage = () => {
     switch (page) {
       case "admin-dashboard":
-        return <AdminDashboard kpis={dashboardKpis} navigate={navigate} onRefresh={refreshDashboard} topConsultants={topConsultants} recentActivities={recentActivities} tasks={tasks} upcomingFollowups={upcomingFollowups} revenueMonthly={revenueMonthly} revenueDealTypes={revenueDealTypes} propertyComposition={propertyComposition} hotProperties={hotProperties} located={locatedProperties} onSaveTask={saveTask} onDeleteTask={deleteTask} />;
+        return <AdminDashboard kpis={dashboardKpis} navigate={navigate} onRefresh={refreshDashboard} topConsultants={topConsultants} recentActivities={recentActivities} tasks={tasks} upcomingFollowups={upcomingFollowups} revenueMonthly={revenueMonthly} revenueDealTypes={revenueDealTypes} propertyComposition={propertyComposition} hotProperties={hotProperties} located={locatedProperties} properties={properties} onSaveTask={saveTask} onDeleteTask={deleteTask} />;
       case "properties":
         return (
           <PropertiesPage

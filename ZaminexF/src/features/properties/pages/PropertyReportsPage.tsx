@@ -22,7 +22,7 @@ import { PropertyCombobox } from "../../../shared/components/ui/PropertyCombobox
 import { ConsultantCombobox } from "../../../shared/components/ui/ConsultantCombobox";
 import { DistrictCombobox } from "../../../shared/components/ui/DistrictCombobox";
 import { apiFetch, readJson, apiErrorMessage, getCsrfToken } from "../../../shared/lib/apiClient";
-import { toast } from "../../../shared/lib/utils";
+import { toast, saveBlob } from "../../../shared/lib/utils";
 import { CHART_COLORS, DELEGATION_COLORS } from "../../../shared/lib/constants";
 import { AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell, ResponsiveContainer, CartesianGrid, XAxis, YAxis, Tooltip, ReferenceLine, Legend, RadarChart, Radar, PolarGrid, PolarAngleAxis, ScatterChart, ZAxis, Scatter, PieChart as RechartsPieChart, RadialBarChart, RadialBar } from "recharts";
 import { Building2, FileText, CheckSquare, BellRing, Users, Activity, Settings, Plus, RefreshCw, Eye, Edit2, Trash2, Archive, Clock, MapPin, Check, X, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, SlidersHorizontal, ArrowUpRight, LayoutGrid, List, Download, Search, MoreVertical, Phone, Mail, Calendar, TrendingUp, Star, Shield, Lock, Key, Send, Loader2, AlertTriangle, Info, XCircle, CheckCircle2, TriangleAlert, Columns, MessageSquare, Sparkles, GripVertical, Building, History, Flame, Image, Zap, LayoutDashboard, Command, Filter, Award, BarChart3, Layers, AlertCircle, Target } from "lucide-react";
@@ -75,13 +75,7 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
         return;
       }
       const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `property-report-${propertyId}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(a.href);
+      saveBlob(blob, `property-report-${propertyId}.csv`);
       toast({ type: "success", message: "خروجی CSV دریافت شد." });
     } catch {
       toast({ type: "error", message: "خطا در تهیه خروجی CSV" });
@@ -110,13 +104,7 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
         return;
       }
       const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `property-report-${propertyId}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(a.href);
+      saveBlob(blob, `property-report-${propertyId}.pdf`);
       toast({ type: "success", message: "خروجی PDF دریافت شد." });
     } catch {
       toast({ type: "error", message: "خطا در تهیه خروجی PDF" });
