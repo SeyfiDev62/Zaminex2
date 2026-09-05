@@ -34,3 +34,10 @@ ZaminexB/media/
 # apps.common.checks turns a missing or inconsistent build into a hard error
 # when DEBUG is off, so this can never ship silently.
 ZaminexB/static/frontend/
+
+# STATIC_ROOT: the directory `collectstatic` copies everything into for a
+# production deploy. It is generated output derived entirely from tracked
+# sources, so committing it would mean two copies that can disagree — and
+# every `collectstatic` run would leave 160 untracked files in `git status`,
+# which is exactly how a real change gets missed among the noise.
+ZaminexB/staticfiles/
