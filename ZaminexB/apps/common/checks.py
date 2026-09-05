@@ -173,3 +173,59 @@ def check_pg_trgm(app_configs, **kwargs):
             id="pg_trgm.W002",
         )
     ]
+
+
+@register()
+def check_pending_migrations(app_configs, **kwargs):
+    """Warn when the database schema is behind the code.
+
+    ``zaminex_backup.sql`` is a snapshot, not a guarantee: it records the
+    migrations that existed when it was taken. Importing it into an empty
+    database therefore produces a site that *looks* healthy — it starts, the
+    home page renders, most queries work — and is missing whole tables.
+    Verified against the shipped dump: 36 tables instead of 44, and
+    ``SELECT ... FROM tickets_ticket`` fails with "relation does not exist",
+    so every ticket screen 500s while nothing else has complained.
+
+    ``runserver`` prints its own reminder, but a WSGI deployment never runs
+    ``runserver``, and neither ``migrate`` nor ``check`` says anything. This
+    is the entry point that does.
+
+    A warning rather than an error for the same reason as pg_trgm: an error
+    would block ``migrate``, which is the thing that fixes it.
+    """
+    from django.db import connection
+    from django.db.migrations.loader import MigrationLoader
+
+    try:
+        loader = MigrationLoader(connection, ignore_no_migrations=True)
+    except Exception:
+        # No database yet, or no connection. Not this check's problem.
+        return []
+
+    plan = []
+    for leaf in loader.graph.leaf_nodes():
+        for node in loader.graph.forwards_plan(leaf):
+            if node not in plan:
+                plan.append(node)
+    pending = [
+        f"{app}.{name}"
+        for app, name in plan
+        if (app, name) not in loader.applied_migrations
+    ]
+    if not pending:
+        return []
+
+    shown = ", ".join(pending[:5])
+    if len(pending) > 5:
+        shown += f" and {len(pending) - 5} more"
+    return [
+        Warning(
+            f"The database is missing {len(pending)} migration(s): {shown}. "
+            "Tables and columns the code expects may not exist yet, so parts "
+            "of the site will fail with 'relation does not exist' until this "
+            "is run.",
+            hint="python manage.py migrate",
+            id="migrations.W001",
+        )
+    ]
