@@ -56,7 +56,7 @@ export function normalizeText(
       // Unify Persian / Arabic-Indic digits to ASCII
       .replace(/[\u06F0-\u06F9\u0660-\u0669]/g, (d) => DIGIT_MAP[d] ?? d)
       // Remove zero-width non-joiner (ZWNJ)
-      .replace(/\200c/g, "")
+      .replace(/\u200c/g, "")
       // Collapse multiple whitespaces to a single space
       .replace(/\s+/g, " ")
       .trim()
