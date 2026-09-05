@@ -374,6 +374,10 @@ class PropertyImage(models.Model):
         upload_to="properties/images/",
         verbose_name="تصویر",
         validators=[validate_property_image],
+        # apps.common.media authorises every /media/properties/... request by
+        # looking the path up in this column, so without an index each served
+        # image costs a sequential scan of the whole gallery.
+        db_index=True,
     )
     sort_order = models.PositiveIntegerField(default=0, verbose_name="ترتیب نمایش")
 

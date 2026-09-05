@@ -67,7 +67,8 @@ class ConsultantProfile(models.Model):
     full_name = models.CharField(max_length=255, verbose_name="نام و نام خانوادگی")
     mobile = models.CharField(max_length=11, validators=[mobile_validator], unique=True, null=True, blank=True, verbose_name="شماره موبایل")
     branch = models.CharField(max_length=255, verbose_name="شعبه")
-    profile_image = models.ImageField(upload_to="consultants/profile/", blank=True, null=True, verbose_name="تصویر پروفایل")
+    profile_image = models.ImageField(upload_to="consultants/profile/", blank=True, null=True, verbose_name="تصویر پروفایل", # apps.common.media looks this column up on every avatar request.
+        db_index=True)
     hired_at = models.DateField(default=datetime.date.today, verbose_name="تاریخ استخدام")
     notes = models.TextField(blank=True, verbose_name="یادداشت‌ها")
     is_active = models.BooleanField(default=True, verbose_name="فعال")
@@ -103,7 +104,8 @@ class AdminProfile(models.Model):
     full_name = models.CharField(max_length=255, blank=True, verbose_name="نام و نام خانوادگی")
     mobile = models.CharField(max_length=11, validators=[mobile_validator], null=True, blank=True, verbose_name="شماره موبایل")
     branch = models.CharField(max_length=255, blank=True, default="شعبه مرکزی", verbose_name="شعبه")
-    profile_image = models.ImageField(upload_to="admins/profile/", blank=True, null=True, verbose_name="تصویر پروفایل")
+    profile_image = models.ImageField(upload_to="admins/profile/", blank=True, null=True, verbose_name="تصویر پروفایل", # apps.common.media looks this column up on every avatar request.
+        db_index=True)
     hired_at = models.DateField(default=datetime.date.today, verbose_name="تاریخ استخدام")
     notes = models.TextField(blank=True, verbose_name="یادداشت‌ها")
     is_active = models.BooleanField(default=True, verbose_name="فعال")
