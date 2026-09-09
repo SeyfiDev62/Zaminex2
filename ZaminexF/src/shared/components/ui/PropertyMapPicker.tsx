@@ -259,11 +259,12 @@ function PropertyMapPicker({
     setMapNotice("");
     setSearching(true);
     try {
-      // Scope the search with the selected city/province: a neighbourhood
-      // name typed bare (e.g. «گلستان») exists in many cities, and the
-      // selected context is what makes it resolve the exact one. A place
-      // outside the province still resolves — the bounded search simply
-      // falls back to the unbounded one.
+      // Free-text lookup (no `variants`): the selected city/province only
+      // biases the ranking, so a neighbourhood name typed bare (e.g. «گلستان»)
+      // resolves to the one in the selected city, while a place the operator
+      // deliberately searches elsewhere still resolves — the query is sent
+      // unbounded and its result is never filtered out by province. See
+      // resolvePlace() in iranLocations.ts.
       const outcome = await resolvePlace(q.trim(), "district", {
         provinceName,
         cityName,

@@ -384,7 +384,9 @@ describe("resolvePlace / resolvePlaceCoordinates", () => {
     expect(outcome).toEqual({ status: "not_found" });
   });
 
-  it("free-text search (no variants) → single qualified query", async () => {
+  it("free-text search resolves the first hit on the most-specific query", async () => {
+    // With a city + province selected, the most specific variant is tried
+    // first and, when it hits, no further query is sent.
     const fetchMock = vi.fn(async () =>
       jsonResponse([{ lat: "36.56", lon: "53.06", address: { city: "Sari" } }])
     );
@@ -396,46 +398,110 @@ describe("resolvePlace / resolvePlaceCoordinates", () => {
     });
 
     expect(result).toEqual([36.56, 53.06]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(qOf(String(fetchMock.mock.calls[0][0]))).toBe("گلستان, ساری, مازندران");
+  });
+
+  it("free-text search sends every query unbounded (province only biases ranking)", async () => {
+    // The province viewbox is passed so the ranker prefers in-province hits,
+    // but `bounded=1` is never sent: a query outside the province must still
+    // be able to resolve.
+    const fetchMock = vi.fn(async () =>
+      jsonResponse([{ lat: "36.56", lon: "53.06", address: { city: "Sari" } }])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await resolvePlaceCoordinates("گلستان", "district", {
+      provinceName: "مازندران",
+      cityName: "ساری",
+    });
+
+    const params = paramsOf(fetchMock.mock.calls[0][0]);
+    expect(params.has("bounded")).toBe(false);
+    // The province viewbox is still attached for ranking.
+    expect(params.has("viewbox")).toBe(true);
+  });
+
+  it("free-text search accepts a hit in another province (intentional cross-province search)", async () => {
+    // The operator typed the query by hand and may deliberately be searching
+    // outside the form's selected province. گلستان is also a real district in
+    // تهران: the top hit must be returned as-is, never rejected.
+    const fetchMock = vi.fn(async () =>
+      jsonResponse([{ lat: "35.6892", lon: "51.389", address: { province: "تهران" } }])
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolvePlaceCoordinates("گلستان", "district", {
+      provinceName: "مازندران",
+    });
+
+    expect(result).toEqual([35.6892, 51.389]);
+  });
+
+  it("free-text search walks the ladder to the bare query when specific variants miss", async () => {
+    // The most specific variants miss; the bare text the user typed is the
+    // last variant and is what finally resolves.
+    const fetchMock = vi.fn(async (url: string) => {
+      const q = qOf(String(url));
+      if (q === "گلستان") {
+        return jsonResponse([{ lat: "35.6892", lon: "51.389", address: { province: "تهران" } }]);
+      }
+      return jsonResponse([]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await resolvePlaceCoordinates("گلستان", "district", {
+      provinceName: "مازندران",
+      cityName: "ساری",
+    });
+
+    expect(result).toEqual([35.6892, 51.389]);
     const queries = fetchMock.mock.calls.map(([u]) => qOf(String(u)));
-    // Single query, qualified with city + province (today's behaviour).
-    expect(queries).toEqual(["گلستان, ساری, مازندران"]);
+    expect(queries).toEqual(["گلستان, ساری, مازندران", "گلستان, مازندران", "گلستان"]);
   });
 
-  it("free-text search now rejects a hit in the wrong province", async () => {
-    // The acceptance rule used to guard only the structured path, so the search
-    // box could happily return a homonymous neighbourhood elsewhere.
-    // گلستان is a real district in Tehran as well: the bounded pass misses
-    // and the unbounded retry hands back the Tehran one.
-    const fetchMock = vi.fn(async (url: string) => {
-      if (paramsOf(url).get("bounded") === "1") return jsonResponse([]);
-      return jsonResponse([{ lat: "35.6892", lon: "51.389", address: { province: "تهران" } }]);
-    });
+  it("free-text search with no location selected sends the bare query", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse([{ lat: "35.6892", lon: "51.389" }])
+    );
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await resolvePlaceCoordinates("گلستان", "district", {
+    const result = await resolvePlaceCoordinates("میدان آزادی تهران", "district");
+
+    expect(result).toEqual([35.6892, 51.389]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const params = paramsOf(fetchMock.mock.calls[0][0]);
+    expect(params.get("q")).toBe("میدان آزادی تهران");
+    // No province selected → no viewbox to bias with, and never bounded.
+    expect(params.has("viewbox")).toBe(false);
+    expect(params.has("bounded")).toBe(false);
+  });
+
+  it("free-text search → unavailable is distinct from not_found", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ detail: "down" }, 503));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const outcome = await resolvePlace("گلستان", "district", {
       provinceName: "مازندران",
     });
 
-    expect(result).toBeNull();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(outcome).toEqual({ status: "unavailable" });
+    // Fails fast on the first variant — a downed geocoder is down for the rest.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("free-text search retries without bounded when the bounded pass misses", async () => {
-    const fetchMock = vi.fn(async (url: string) => {
-      const params = paramsOf(url);
-      if (params.get("bounded") === "1") return jsonResponse([]);
-      return jsonResponse([{ lat: "36.56", lon: "53.06", address: { city: "Sari" } }]);
-    });
+  it("free-text search → not_found when every variant misses", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse([]));
     vi.stubGlobal("fetch", fetchMock);
 
-    const result = await resolvePlaceCoordinates("گلستان", "district", {
+    const outcome = await resolvePlace("جای‌ناموجود", "district", {
       provinceName: "مازندران",
+      cityName: "ساری",
     });
 
-    expect(result).toEqual([36.56, 53.06]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(paramsOf(fetchMock.mock.calls[0][0]).get("bounded")).toBe("1");
-    expect(paramsOf(fetchMock.mock.calls[1][0]).has("bounded")).toBe(false);
+    expect(outcome).toEqual({ status: "not_found" });
+    // All three variants tried before giving up.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("empty name → not_found, no request", async () => {

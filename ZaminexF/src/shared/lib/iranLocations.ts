@@ -329,31 +329,6 @@ export type ResolveOutcome =
 const NOT_FOUND: ResolveOutcome = { status: "not_found" };
 const UNAVAILABLE: ResolveOutcome = { status: "unavailable" };
 
-/** Bounded first (keep the hit inside the province), then unbounded. */
-/** Which pass produced a hit matters: only the bounded one is in-province. */
-type SearchAttempt =
-  | { status: "unavailable" }
-  | { status: "not_found" }
-  | { status: "found"; hit: GeocodeHit; bounded: boolean };
-
-async function searchWithFallback(
-  query: string,
-  viewbox: string | null
-): Promise<SearchAttempt> {
-  if (!viewbox) {
-    const attempt = await geocodeSearch(query, null, false);
-    return attempt.status === "found" ? { ...attempt, bounded: false } : attempt;
-  }
-  const bounded = await geocodeSearch(query, viewbox, true);
-  // A downed geocoder is down for the retry too — fail fast instead of making
-  // the operator wait through a second timeout.
-  if (bounded.status !== "not_found") {
-    return bounded.status === "found" ? { ...bounded, bounded: true } : bounded;
-  }
-  const unbounded = await geocodeSearch(query, viewbox, false);
-  return unbounded.status === "found" ? { ...unbounded, bounded: false } : unbounded;
-}
-
 /**
  * Resolve a place name, reporting *why* it failed.
  *
@@ -363,11 +338,16 @@ async function searchWithFallback(
  *    round trip and failed outright with no internet.
  *  - A **city** / **district** structured selection (``options.variants``)
  *    walks an ordered ladder of queries (most specific first) so a repeated
- *    name resolves to its selected parents, and applies :func:`acceptsResult`.
- *  - **Free-text search** (the picker's search box) keeps its single qualified
- *    query with the bounded→unbounded fallback, and now applies
- *    :func:`acceptsResult` too — it used to accept the top hit unconditionally,
- *    so a homonymous neighbourhood in another province could be returned.
+ *    name resolves to its selected parents, sends each one ``bounded`` until
+ *    it is fully qualified, and applies :func:`acceptsResult`.
+ *  - **Free-text search** (the picker's search box, no ``options.variants``)
+ *    walks the same ordered ladder but sends every query *unbounded* and does
+ *    **not** apply :func:`acceptsResult`: the operator typed the string by
+ *    hand and may be searching outside the form's selected province on
+ *    purpose, so the selected place only biases the ranking (via ``viewbox``)
+ *    and never filters the result out. The bare text the user typed is always
+ *    the last variant, so a search always reaches the geocoder even with no
+ *    location selected.
  */
 export async function resolvePlace(
   name: string,
@@ -398,24 +378,39 @@ export async function resolvePlace(
   }
 
   if (!options?.variants) {
-    // Free-text search: one qualified query, bounded → unbounded.
-    const parts = [clean];
-    if (kind === "district" && city) parts.push(city);
-    if (province) parts.push(province);
-    const q = parts.join(", ");
-    const qualified = variantIsFullyQualified(q, kind, context);
-    const attempt = await searchWithFallback(q, viewbox);
-    if (attempt.status === "unavailable") return UNAVAILABLE;
-    if (attempt.status !== "found") return NOT_FOUND;
-    // A hit from the bounded pass is inside the province viewbox by
-    // construction, so a fully qualified query may trust the ranker there. The
-    // unbounded retry deliberately drops that constraint — it runs precisely
-    // because nothing matched in-province — so its hit always gets checked.
-    // Without this the search box answered a homonymous neighbourhood in
-    // another province, which is how «گلستان, مازندران» used to land in Tehran.
-    return acceptsResult(attempt.hit, province, qualified && attempt.bounded)
-      ? { status: "found", location: [attempt.hit.lat, attempt.hit.lon] }
-      : NOT_FOUND;
+    // Free-text search — the map picker's search box, where the operator types
+    // the query by hand rather than picking it from the location selects.
+    //
+    // It walks the SAME ordered ladder as a structured selection (most
+    // specific first, ending on the bare text the user typed), so a bare
+    // neighbourhood name still resolves inside the selected city/province when
+    // one is chosen — «گلستان» with ساری selected finds گلستانِ ساری, not the
+    // one in تهران. But it differs from the structured path in two deliberate
+    // ways, and that difference is the whole fix:
+    //
+    //   * every query is sent UNBOUNDED. `viewbox` is still passed, so the
+    //     selected province only *biases* the ranking; it never hard-filters
+    //     the result out. The previous version sent `bounded=1` first, so any
+    //     place outside the province viewbox (an address the operator
+    //     deliberately searched elsewhere) came back empty.
+    //
+    //   * acceptsResult() is NOT applied. The operator typed this string on
+    //     purpose and may well be looking somewhere other than the form's
+    //     selected province, so the top hit is taken as-is. The old rule
+    //     rejected exactly those intentional cross-province searches and
+    //     reported «نتیجه‌ای یافت نشد» for a place that plainly exists.
+    //
+    // The ladder short-circuits on the first hit, and a downed geocoder on any
+    // query is reported as «unavailable» rather than being mistaken for a miss.
+    const variants = buildQueryVariants(clean, kind === "city" ? "city" : "district", context);
+    for (const variant of variants) {
+      const outcome = await geocodeSearch(variant, viewbox, false);
+      if (outcome.status === "unavailable") return UNAVAILABLE;
+      if (outcome.status === "found") {
+        return { status: "found", location: [outcome.hit.lat, outcome.hit.lon] };
+      }
+    }
+    return NOT_FOUND;
   }
 
   // Structured selection: ordered variant ladder + acceptance rule.
