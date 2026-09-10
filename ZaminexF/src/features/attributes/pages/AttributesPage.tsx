@@ -352,15 +352,37 @@ function AttributesPage({ csrfToken }: { csrfToken: string }) {
     }
   };
 
+  // Live attribute count per category, derived from the shared `attributes`
+  // state rather than the server-provided `attributeCount` snapshot. The
+  // snapshot is only refreshed on mount, so after creating a field the count
+  // in the picker stayed stale until a manual reload; counting from
+  // `attributes` — the same source the «دسته‌بندی ویژگی‌ها» tab already uses —
+  // makes it update the instant `attributes` changes (create / move / delete),
+  // and keeps both places on one source of truth. Only live rows are counted,
+  // exactly matching the server's `attribute_count()` (Attribute.objects).
+  const attributeCountByCategory = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const a of attributes) {
+      counts.set(a.category, (counts.get(a.category) ?? 0) + 1);
+    }
+    return counts;
+  }, [attributes]);
+
   /**
    * Categories offered when defining a new field. Deactivated ones are left
    * out: they still have to stay visible in the «دسته‌بندی ویژگی‌ها» tab so an
    * administrator can switch them back on, but a new field should not be
    * filed under a group that has been retired.
+   *
+   * Each category's `attributeCount` is overridden with the live count so the
+   * badge in the picker reflects a just-added field immediately.
    */
   const selectableCategories = useMemo(
-    () => categories.filter((c) => c.isActive),
-    [categories]
+    () =>
+      categories
+        .filter((c) => c.isActive)
+        .map((c) => ({ ...c, attributeCount: attributeCountByCategory.get(c.name) ?? 0 })),
+    [categories, attributeCountByCategory]
   );
 
   /** Destinations offered in the move modal: every group but the current one. */
