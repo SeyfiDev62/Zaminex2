@@ -56,6 +56,7 @@ OPTION_KEYS = {
     "area",
     "latitude",
     "longitude",
+    "isShared",
     "consultantId",
     "consultantName",
 }
@@ -177,6 +178,19 @@ class OptionsAgreementTests(_OptionsBase):
             self._option("قیمت‌دار")["internalCode"], self.priced.internal_code
         )
 
+    def test_is_shared_matches_the_list_serializer(self):
+        """The combobox badge and the per-consultant filters read `isShared`,
+        so it has to agree with the list serializer field for field."""
+        Property.objects.filter(pk=self.priced.pk).update(is_shared=True)
+        self.assertIs(self._option("قیمت‌دار")["isShared"], True)
+        self.assertIs(self._option("بدون آگهی")["isShared"], False)
+        for title in ("قیمت‌دار", "بدون آگهی"):
+            self.assertEqual(
+                self._option(title)["isShared"],
+                self._list_row(title)["isShared"],
+                f"isShared diverged for {title}",
+            )
+
 
 class OptionsAccessTests(_OptionsBase):
     """Access levels must be identical to the list endpoint's."""
@@ -193,6 +207,15 @@ class OptionsAccessTests(_OptionsBase):
         client = APIClient()
         client.force_authenticate(user=self.agent)
         self.assertEqual(self._titles(client), {"مال من"})
+
+    def test_consultant_also_sees_shared_properties_of_others(self):
+        """A property another consultant owns but shared with everyone must be
+        offered in the comboboxes — the wizards filter on this list, so a
+        missing row cannot be selected at all."""
+        _make_property(self.other, title="اشتراکی دیگری", is_shared=True)
+        client = APIClient()
+        client.force_authenticate(user=self.agent)
+        self.assertEqual(self._titles(client), {"مال من", "اشتراکی دیگری"})
 
     def test_admin_sees_everything(self):
         client = APIClient()

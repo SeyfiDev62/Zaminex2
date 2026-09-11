@@ -328,6 +328,7 @@ class PropertyViewSet(viewsets.ModelViewSet):
                 "latitude",
                 "longitude",
                 "price",
+                "is_shared",
                 "consultant_id",
                 "consultant__first_name",
                 "consultant__last_name",
@@ -361,6 +362,12 @@ class PropertyViewSet(viewsets.ModelViewSet):
                     "area": row["area"],
                     "latitude": row["latitude"],
                     "longitude": row["longitude"],
+                    # Consultant comboboxes surface shared properties (owned by
+                    # other consultants but visible to everyone) alongside the
+                    # caller's own, tagged with an «اشتراکی» badge. The queryset
+                    # already includes them (Q(consultant) | Q(is_shared)); this
+                    # flag is what the frontend filters and badge rely on.
+                    "isShared": bool(row["is_shared"]),
                     "consultantId": row["consultant_id"],
                     "consultantName": (
                         (full_name or row["consultant__username"] or "نامشخص")
