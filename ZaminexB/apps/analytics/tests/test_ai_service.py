@@ -23,6 +23,7 @@ from apps.analytics.ai_service import (
     generate_description,
     get_cached_description,
     is_ai_configured,
+    peek_cached_description,
 )
 from apps.common.models import CompanySettings
 from apps.listings.models import Listing
@@ -348,6 +349,46 @@ class AICacheAndIsolationTests(TestCase):
         self.assertEqual(s1, s2)
         # Ahmed's summary must not leak into Sara's.
         self.assertNotEqual(a1["summary"], s1["summary"])
+
+    def test_peek_returns_none_without_calling_the_model_on_a_miss(self):
+        """The read-only peek never generates: a cache miss returns None and
+        makes no upstream call (the property that keeps the PDF export fast)."""
+        data = {"name": "احمد", "kpis": {"openTasks": 3}}
+        with mock.patch("apps.analytics.ai_service._chat_completion") as m:
+            result = peek_cached_description(
+                data, entity="consultant", entity_id=self.p1.pk
+            )
+        self.assertIsNone(result)
+        self.assertEqual(m.call_count, 0)
+
+    def test_peek_returns_the_cached_description_after_a_hit(self):
+        """Once a description is cached, the peek serves it — still without a
+        second upstream call."""
+        data = {"name": "احمد", "kpis": {"openTasks": 3}}
+        raw = self._raw("احمد")
+        with mock.patch(
+            "apps.analytics.ai_service._chat_completion", return_value=raw
+        ) as m:
+            generated = get_cached_description(
+                data, entity="consultant", entity_id=self.p1.pk
+            )
+            peeked = peek_cached_description(
+                data, entity="consultant", entity_id=self.p1.pk
+            )
+        self.assertEqual(m.call_count, 1)
+        self.assertEqual(peeked, generated)
+
+    def test_peek_returns_none_when_ai_is_unconfigured(self):
+        """With AI switched off the peek is a no-op — no error, no call."""
+        s = CompanySettings.get_solo()
+        s.ai_enabled = False
+        s.save()
+        with mock.patch("apps.analytics.ai_service._chat_completion") as m:
+            result = peek_cached_description(
+                {"name": "احمد"}, entity="consultant", entity_id=self.p1.pk
+            )
+        self.assertIsNone(result)
+        self.assertEqual(m.call_count, 0)
 
     def test_fingerprint_differs_across_entities(self):
         fp1 = data_fingerprint({"name": "احمد"}, entity="consultant", entity_id=1)

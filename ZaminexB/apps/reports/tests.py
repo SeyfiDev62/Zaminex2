@@ -573,13 +573,16 @@ class PropertyPdfAiSectionTests(TestCase):
         self.assertEqual(res.status_code, 200, res.content[:200])
         self.assertTrue(res.content.startswith(b"%PDF-"))
 
-    def test_ai_section_is_present_when_available(self):
+    def test_ai_section_is_present_when_cached(self):
         # Size compared at the build level (no HTTP), because every HTTP export
         # appends a new activity-log row and would confound the delta.
+        #
+        # The export reads an already-cached description only, so the section
+        # appears exactly when ``peek_cached_description`` returns one.
         base_size = self._pdf_size()
 
         with mock.patch(
-            "apps.analytics.ai_service.get_cached_description",
+            "apps.analytics.ai_service.peek_cached_description",
             return_value={
                 "positives": [
                     "موقعیت مکانی مناسب و قیمت رقابتی",
@@ -596,10 +599,31 @@ class PropertyPdfAiSectionTests(TestCase):
 
         self.assertGreater(enriched_size, base_size)
 
+    def test_export_never_triggers_a_live_ai_call(self):
+        # The heart of the fix: building the PDF must never generate a
+        # description on the fly (a live model call there could outlast the
+        # web server timeout and truncate the response to a zero-byte PDF).
+        # The read-only peek stands in for the cache; the live generator is
+        # rigged to blow up if the build ever reaches it.
+        with mock.patch(
+            "apps.analytics.ai_service.peek_cached_description",
+            return_value=None,
+        ), mock.patch(
+            "apps.analytics.ai_service.get_cached_description",
+            side_effect=AssertionError("live AI generation must not run"),
+        ), mock.patch(
+            "apps.analytics.ai_service.generate_description",
+            side_effect=AssertionError("live AI generation must not run"),
+        ):
+            res = self._export()
+
+        self.assertEqual(res.status_code, 200, res.content[:200])
+        self.assertTrue(res.content.startswith(b"%PDF-"))
+
     def test_ai_failure_does_not_break_the_export(self):
         with mock.patch(
-            "apps.analytics.ai_service.get_cached_description",
-            side_effect=RuntimeError("provider timeout"),
+            "apps.analytics.ai_service.peek_cached_description",
+            side_effect=RuntimeError("cache backend down"),
         ):
             # Failure is swallowed: the export still succeeds and stays a
             # valid PDF, just without the AI section.
