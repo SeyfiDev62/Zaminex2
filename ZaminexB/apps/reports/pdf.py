@@ -399,20 +399,25 @@ def _kpi_section(story, styles, kpis: dict) -> None:
 def _ai_section(story, styles, prop) -> None:
     """The AI description (positives / negatives / summary), or nothing.
 
-    Reuses the cached AI pipeline only (``_property_ai_data`` +
-    ``get_cached_description``). Any problem — AI unconfigured, provider
-    failure, timeout — omits the section; the export must never fail or hang
-    because of AI.
+    Reads an *already-cached* description only (``_property_ai_data`` +
+    ``peek_cached_description``); it never generates one. A live model call
+    here could outlast the web server's request timeout and truncate the
+    response into a zero-byte, unopenable PDF, so the export stays fast and
+    self-contained: when nothing is cached — exactly as when AI is
+    unconfigured or fails — the section is simply omitted.
     """
     try:
         from apps.analytics.views import _property_ai_data
-        from apps.analytics.ai_service import get_cached_description
+        from apps.analytics.ai_service import peek_cached_description
 
         data = _property_ai_data(prop)
-        description = get_cached_description(
+        description = peek_cached_description(
             data, entity="property", entity_id=prop.pk
         )
     except Exception:
+        return
+
+    if not description:
         return
 
     positives = [str(x) for x in (description.get("positives") or []) if x]

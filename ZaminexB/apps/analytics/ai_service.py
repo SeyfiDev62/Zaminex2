@@ -446,3 +446,27 @@ def get_cached_description(
         description = generate_description(data, entity=entity)
         _store_description(entity, entity_id, current_fp, description)
         return description
+
+
+def peek_cached_description(
+    data: dict[str, Any], *, entity: str, entity_id: Any
+) -> dict[str, Any] | None:
+    """Return an already-cached AI description, or ``None`` — never generate.
+
+    The read-only twin of :func:`get_cached_description`: it runs the exact
+    same fingerprint + shared-cache/database lookup, but stops there. It never
+    acquires the generation lock and never calls the model, so it cannot make a
+    network request, block, or raise ``AIError`` when AI is unconfigured.
+
+    This is what callers on a latency-critical path use — the «گزارش کامل» PDF
+    export in particular. Building that document must be fast and self-contained:
+    a live model call there (up to the lock wait plus the request timeout) could
+    outlast the web server's own timeout and truncate the response into a
+    zero-byte, unopenable PDF. Reusing a description that is already cached costs
+    nothing; a cache miss simply means the AI section is omitted, mirroring the
+    export's existing behaviour when AI is disabled or fails.
+    """
+    if not is_ai_configured():
+        return None
+    current_fp = data_fingerprint(data, entity=entity, entity_id=entity_id)
+    return _read_cached(entity, entity_id, current_fp)
