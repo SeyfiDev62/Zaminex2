@@ -7,14 +7,22 @@ records, so the document always matches what the screen shows:
     1. header  — company name, title, generation time, exported by
     2. اطلاعات ملک — the property's stored facts
     3. شاخص‌های کلیدی — the report KPIs
-    4. توصیف هوش مصنوعی — the AI description, omitted when AI is unavailable
-    5. آگهی‌ها — every listing of the property with its commercial details
-    6. وظایف — every task attached to the property
-    7. پیگیری‌ها — every active follow-up
-    8. نمودارها — a few compact charts from the report data
-    9. سابقه و لاگ‌ها — every activity-log entry that belongs to this
+    4. آگهی‌ها — every listing of the property with its commercial details
+    5. وظایف — every task attached to the property
+    6. پیگیری‌ها — every active follow-up
+    7. نمودارها — a few compact charts from the report data
+    8. سابقه و لاگ‌ها — every activity-log entry that belongs to this
        property (its own events plus the events of its listings, follow-ups
        and tasks)
+
+The AI description («توصیف هوش مصنوعی») is deliberately *not* part of this
+document. It used to sit between the KPIs and the listings, reading an
+already-cached description and omitting itself when nothing was cached. It is
+gone from the PDF only: the dashboards and the property detail page keep it,
+because the printed report is a factual record handed to customers and filed,
+while the on-screen summary is an internal reading aid. Consequently the
+export never touches ``apps.analytics.ai_service`` at all — not even the
+read-only cache peek — and the section numbers run ۱..۷ with no gap.
 
 Persian text is reshaped (arabic_reshaper) and bidi-flipped (python-bidi)
 before it reaches reportlab, and the project's own IRAN Rounded font is
@@ -396,53 +404,8 @@ def _kpi_section(story, styles, kpis: dict) -> None:
     _label_value_table(story, styles, rows)
 
 
-def _ai_section(story, styles, prop) -> None:
-    """The AI description (positives / negatives / summary), or nothing.
-
-    Reads an *already-cached* description only (``_property_ai_data`` +
-    ``peek_cached_description``); it never generates one. A live model call
-    here could outlast the web server's request timeout and truncate the
-    response into a zero-byte, unopenable PDF, so the export stays fast and
-    self-contained: when nothing is cached — exactly as when AI is
-    unconfigured or fails — the section is simply omitted.
-    """
-    try:
-        from apps.analytics.views import _property_ai_data
-        from apps.analytics.ai_service import peek_cached_description
-
-        data = _property_ai_data(prop)
-        description = peek_cached_description(
-            data, entity="property", entity_id=prop.pk
-        )
-    except Exception:
-        return
-
-    if not description:
-        return
-
-    positives = [str(x) for x in (description.get("positives") or []) if x]
-    negatives = [str(x) for x in (description.get("negatives") or []) if x]
-    summary = (description.get("summary") or "").strip()
-    if not summary and not positives and not negatives:
-        return
-
-    _section_header(story, styles, "۳. توصیف هوش مصنوعی")
-    if summary:
-        story.append(Paragraph(t(summary), styles["cell"]))
-        story.append(Spacer(1, 2 * mm))
-    if positives:
-        story.append(Paragraph(t("نکات مثبت:"), styles["cellLabel"]))
-        for item in positives:
-            story.append(Paragraph(t(f"• {item}"), styles["cell"]))
-    if negatives:
-        story.append(Spacer(1, 1.5 * mm))
-        story.append(Paragraph(t("نکات منفی:"), styles["cellLabel"]))
-        for item in negatives:
-            story.append(Paragraph(t(f"• {item}"), styles["cell"]))
-
-
 def _listings_section(story, styles, prop) -> None:
-    _section_header(story, styles, "۴. آگهی‌های ملک")
+    _section_header(story, styles, "۳. آگهی‌های ملک")
     listings = list(prop.listings.all())
     if not listings:
         story.append(Paragraph(t("برای این ملک آگهی‌ای ثبت نشده است."), styles["empty"]))
@@ -471,7 +434,7 @@ def _listings_section(story, styles, prop) -> None:
 
 
 def _tasks_section(story, styles, prop) -> None:
-    _section_header(story, styles, "۵. وظایف ملک")
+    _section_header(story, styles, "۴. وظایف ملک")
     tasks = list(prop.tasks.all())
     if not tasks:
         story.append(Paragraph(t("برای این ملک وظیفه‌ای ثبت نشده است."), styles["empty"]))
@@ -497,7 +460,7 @@ def _tasks_section(story, styles, prop) -> None:
 
 
 def _followups_section(story, styles, prop) -> None:
-    _section_header(story, styles, "۶. پیگیری‌های ملک")
+    _section_header(story, styles, "۵. پیگیری‌های ملک")
     followups = [f for f in prop.followups.all() if not f.is_archived]
     if not followups:
         story.append(Paragraph(t("برای این ملک پیگیری‌ای ثبت نشده است."), styles["empty"]))
@@ -518,7 +481,7 @@ def _followups_section(story, styles, prop) -> None:
 
 
 def _charts_section(story, styles, charts: dict) -> None:
-    _section_header(story, styles, "۷. نمودارها")
+    _section_header(story, styles, "۶. نمودارها")
     # Chart labels come from the report as display strings; translate the ones
     # that are still English (task / follow-up / channel types) so the whole
     # document reads in Persian. Case-insensitive: the report mixes raw values
@@ -558,7 +521,7 @@ def _logs_section(story, styles, prop) -> None:
 
     from apps.activity.models import ActivityLog
 
-    _section_header(story, styles, "۸. سابقه و لاگ‌های ملک")
+    _section_header(story, styles, "۷. سابقه و لاگ‌های ملک")
     listing_ids = list(prop.listings.values_list("id", flat=True))
     followup_ids = list(prop.followups.values_list("id", flat=True))
     task_ids = list(prop.tasks.values_list("id", flat=True))
@@ -684,7 +647,6 @@ def build_property_pdf(prop, report: dict, exported_by) -> bytes:
 
     _property_info_section(story, styles, prop)
     _kpi_section(story, styles, report.get("kpis") or {})
-    _ai_section(story, styles, prop)
     _listings_section(story, styles, prop)
     _tasks_section(story, styles, prop)
     _followups_section(story, styles, prop)
