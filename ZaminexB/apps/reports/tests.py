@@ -373,7 +373,7 @@ class PropertyReportPdfExportTests(TestCase):
 
 
 # ---------------------------------------------------------------------------
-#  Stage 9 — property PDF: empty-failure hardening + AI section + log tables
+#  Stage 9 — property PDF: empty-failure hardening + section layout + log tables
 # ---------------------------------------------------------------------------
 
 def _pdf_pages(data: bytes) -> int:
@@ -533,9 +533,35 @@ class PropertyPdfEmptyHistoryTests(TestCase):
             self.assertNotIn(token, joined)
 
 
-class PropertyPdfAiSectionTests(TestCase):
-    """The AI section appears when available and is omitted otherwise —
-    the export never fails or hangs because of AI."""
+class _AiTripwire(BaseException):
+    """Raised when the PDF build reaches the AI layer; deliberately uncatchable
+    by an ``except Exception`` handler.
+
+    The removed AI section guarded its cache read with ``except Exception``,
+    which is the right shape for production (an AI outage must never break an
+    export) but makes it the wrong shape for a test: any ``Exception``-derived
+    tripwire is silently eaten, so the test would pass whether or not the
+    pipeline was consulted. Deriving from ``BaseException`` puts the tripwire
+    outside that handler, so reaching the AI layer aborts the build and fails
+    the test instead of being quietly ignored.
+    """
+
+
+class PropertyPdfHasNoAiSectionTests(TestCase):
+    """The printed report contains no AI description, at all.
+
+    The AI summary stays on screen (the dashboards and the property detail
+    page) but was removed from the PDF: the printed document is a factual
+    record handed to customers and filed, so a model-written opinion does not
+    belong in it. Three different things have to hold, and each is a separate
+    failure mode, so each gets its own test:
+
+    * the build never reaches the AI pipeline — not even the read-only cache
+      peek it used to do (that is the *root* of the removal, and it is what
+      keeps a future re-introduction from being silent);
+    * a cached description cannot leak in through some other path;
+    * the remaining sections are renumbered ۱..۷ with no gap left behind.
+    """
 
     def setUp(self):
         self.client = APIClient()
@@ -566,19 +592,38 @@ class PropertyPdfAiSectionTests(TestCase):
     def _pdf_size(self):
         return len(build_property_pdf(self.prop, cached_property_report(self.prop), self.admin))
 
-    def test_ai_section_is_omitted_when_unconfigured(self):
-        # No ai_api_base_url in the test environment → the pipeline raises
-        # AIError, which the PDF build swallows; the export still succeeds.
-        res = self._export()
+    def test_export_never_consults_the_ai_pipeline(self):
+        # Every entry point into the AI layer is rigged to blow up. A PDF
+        # export that still succeeds therefore provably touches none of them —
+        # neither the read-only cache peek the old section used, nor the
+        # description assembler behind it, nor (obviously) a live model call,
+        # which could outlast the request timeout and truncate the response
+        # into a zero-byte, unopenable PDF.
+        #
+        # The tripwire derives from BaseException, not Exception, and that is
+        # load-bearing: the section this replaced wrapped its whole AI read in
+        # ``try: … except Exception: return``, so an AssertionError raised here
+        # would be swallowed and the test would pass either way. Verified by
+        # mutation — re-adding the old section fails this test only with a
+        # BaseException-derived tripwire.
+        boom = _AiTripwire("the PDF export must not touch the AI pipeline")
+        with mock.patch("apps.analytics.views._property_ai_data", side_effect=boom), \
+             mock.patch("apps.analytics.ai_service.peek_cached_description", side_effect=boom), \
+             mock.patch("apps.analytics.ai_service.get_cached_description", side_effect=boom), \
+             mock.patch("apps.analytics.ai_service.generate_description", side_effect=boom):
+            res = self._export()
+
         self.assertEqual(res.status_code, 200, res.content[:200])
+        self.assertEqual(res["Content-Type"], "application/pdf")
         self.assertTrue(res.content.startswith(b"%PDF-"))
 
-    def test_ai_section_is_present_when_cached(self):
-        # Size compared at the build level (no HTTP), because every HTTP export
+    def test_cached_description_changes_nothing_in_the_pdf(self):
+        # Compared at the build level (no HTTP), because every HTTP export
         # appends a new activity-log row and would confound the delta.
         #
-        # The export reads an already-cached description only, so the section
-        # appears exactly when ``peek_cached_description`` returns one.
+        # This is the byte-level complement to the test above: even with a
+        # fully-formed description sitting in the cache, the document is the
+        # same size, so nothing about it can have reached the page.
         base_size = self._pdf_size()
 
         with mock.patch(
@@ -597,40 +642,58 @@ class PropertyPdfAiSectionTests(TestCase):
         ):
             enriched_size = self._pdf_size()
 
-        self.assertGreater(enriched_size, base_size)
+        self.assertEqual(enriched_size, base_size)
 
-    def test_export_never_triggers_a_live_ai_call(self):
-        # The heart of the fix: building the PDF must never generate a
-        # description on the fly (a live model call there could outlast the
-        # web server timeout and truncate the response to a zero-byte PDF).
-        # The read-only peek stands in for the cache; the live generator is
-        # rigged to blow up if the build ever reaches it.
-        with mock.patch(
-            "apps.analytics.ai_service.peek_cached_description",
-            return_value=None,
-        ), mock.patch(
-            "apps.analytics.ai_service.get_cached_description",
-            side_effect=AssertionError("live AI generation must not run"),
-        ), mock.patch(
-            "apps.analytics.ai_service.generate_description",
-            side_effect=AssertionError("live AI generation must not run"),
-        ):
-            res = self._export()
+    def test_section_numbering_has_no_gap_after_the_removal(self):
+        """Sections run ۱..۷ and none of them is the AI description.
 
-        self.assertEqual(res.status_code, 200, res.content[:200])
-        self.assertTrue(res.content.startswith(b"%PDF-"))
+        Asserted by recording the titles handed to ``_section_header`` rather
+        than by reading the PDF: the rendered text is reshaped and bidi-flipped,
+        so extracting it back reliably is not possible. This also pins the
+        *order*, which is the part a partial edit is most likely to break —
+        dropping the section without renumbering would leave a document that
+        jumps from «۲. شاخص‌های کلیدی» straight to «۴. آگهی‌های ملک».
 
-    def test_ai_failure_does_not_break_the_export(self):
-        with mock.patch(
-            "apps.analytics.ai_service.peek_cached_description",
-            side_effect=RuntimeError("cache backend down"),
-        ):
-            # Failure is swallowed: the export still succeeds and stays a
-            # valid PDF, just without the AI section.
-            res = self._export()
+        The build runs with a description sitting in the cache. That matters:
+        the old section emitted its header *only* when one was present, so
+        without this a reintroduced AI section would stay invisible on an
+        empty cache and the assertion would pass vacuously.
+        """
+        seen: list[str] = []
+        real_header = pdf_mod._section_header
 
-        self.assertEqual(res.status_code, 200, res.content[:200])
-        self.assertTrue(res.content.startswith(b"%PDF-"))
+        def spy(story, styles, text):
+            seen.append(text)
+            return real_header(story, styles, text)
+
+        with mock.patch.object(pdf_mod, "_section_header", side_effect=spy), \
+             mock.patch(
+                 "apps.analytics.ai_service.peek_cached_description",
+                 return_value={
+                     "positives": ["موقعیت مکانی مناسب"],
+                     "negatives": ["روزهای حضور در بازار زیاد است"],
+                     "summary": "خلاصه‌ی ساختگی برای این تست.",
+                 },
+             ):
+            build_property_pdf(self.prop, cached_property_report(self.prop), self.admin)
+
+        self.assertEqual(
+            seen,
+            [
+                "۱. اطلاعات ملک",
+                "۲. شاخص‌های کلیدی",
+                "۳. آگهی‌های ملک",
+                "۴. وظایف ملک",
+                "۵. پیگیری‌های ملک",
+                "۶. نمودارها",
+                "۷. سابقه و لاگ‌های ملک",
+            ],
+        )
+        self.assertFalse(
+            any("هوش مصنوعی" in title for title in seen),
+            "the AI section must not come back into the printed report",
+        )
+
 
 
 class PropertyPdfFontFailureTests(TestCase):
