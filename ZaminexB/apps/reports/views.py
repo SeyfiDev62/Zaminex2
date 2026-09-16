@@ -1,3 +1,4 @@
+from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from rest_framework import permissions, serializers, status
@@ -122,78 +123,100 @@ class PropertyReportExportView(APIView):
         return resp
 
 
-class PropertyReportPdfView(APIView):
-    """PDF export of the full property report.
+def _print_error(request, status_code: int, title: str, message: str):
+    """A short Persian error page for the print flow.
 
-    Same scoped data as the JSON/CSV exports, rendered to a printed report
-    (property info → KPIs → listings → follow-ups → charts → activity log).
-
-    Access is deliberately one step stricter than the on-screen report:
-    admins may export any property, while consultants may only export the
-    properties they are assigned to or that are shared with them.
-    Every export is written to the activity log, exactly like the CSV one.
+    The print page is an HTML document opened in a new tab, so a failed
+    access check or an unknown property must not answer with a JSON body —
+    the user would be left with a blank tab and no explanation.
     """
+    from django.template.response import TemplateResponse
 
-    permission_classes = [IsAuthenticatedRole]
+    return TemplateResponse(
+        request,
+        "reports/print_error.html",
+        {"title": title, "message": message},
+        status=status_code,
+    )
 
-    def get(self, request, property_id):
-        try:
-            pid = int(property_id)
-        except (TypeError, ValueError):
-            return Response({"detail": "شناسه ملک نامعتبر است."}, status=400)
 
-        from apps.common.access import can_access_property
-        from apps.properties.models import Property as PropertyModel
+@login_required
+def property_report_print(request, property_id):
+    """Print-ready HTML version of the full property report.
 
-        prop = (
-            PropertyModel.objects.select_related(
-                "consultant",
-                "property_type_ref",
-                "property_usage",
-                "district",
-                "district__city",
-                "district__city__province",
-            )
-            .prefetch_related("listings__deal_type", "tasks", "followups", "images")
-            .filter(pk=pid)
-            .first()
+    The SPA's «خروجی PDF» button opens this page in a new tab; the page
+    renders the same scoped report the JSON/CSV exports serve (property info
+    → KPIs → listings → follow-ups → charts → activity log) and opens the
+    browser's native print dialog, where the user picks the destination —
+    a real printer or «ذخیره به PDF» — with the usual pages/color controls.
+    This replaces the old downloaded PDF, which could arrive truncated and
+    offered no print controls.
+
+    Access is deliberately one step stricter than the on-screen report,
+    exactly as the old PDF export was: admins may print any property, while
+    consultants may only print the properties they are assigned to or that
+    are shared with them. Every successful print is written to the activity
+    log, exactly like the CSV export; a denied one is not.
+    """
+    from apps.common.access import can_access_property
+    from apps.properties.models import Property as PropertyModel
+
+    try:
+        pid = int(property_id)
+    except (TypeError, ValueError):
+        return _print_error(request, 400, "آدرس نامعتبر است.", "شناسه ملک نامعتبر است.")
+
+    prop = (
+        PropertyModel.objects.select_related(
+            "consultant",
+            "property_type_ref",
+            "property_usage",
+            "district",
+            "district__city",
+            "district__city__province",
         )
-        if prop is None:
-            return Response({"detail": "ملک مورد نظر وجود ندارد."}, status=404)
-        if not can_access_property(request.user, prop):
-            return Response({"detail": "شما به گزارش این ملک دسترسی ندارید."}, status=403)
-
-        filters = {
-            "date_from": _parse_date(request.query_params.get("date_from")),
-            "date_to": _parse_date(request.query_params.get("date_to")),
-        }
-        filters = {k: v for k, v in filters.items() if v is not None}
-        report = cached_property_report(prop, filters=filters)
-
-        # Record the export in the activity log, mirroring the CSV export.
-        from apps.activity.activity import log_activity
-        from apps.activity.models import ActivityLog
-
-        log_activity(
-            user=request.user,
-            action=ActivityLog.ActionType.EXPORT,
-            target_type=ActivityLog.TargetType.PROPERTY,
-            target_id=pid,
-            description=f"گزارش کامل ملک «{prop.title}» به‌صورت PDF دریافت شد",
-            metadata={
-                "format": "pdf",
-                "property_id": pid,
-                "date_from": request.query_params.get("date_from"),
-                "date_to": request.query_params.get("date_to"),
-            },
+        .prefetch_related("listings__deal_type", "tasks", "followups", "images")
+        .filter(pk=pid)
+        .first()
+    )
+    if prop is None:
+        return _print_error(request, 404, "ملک پیدا نشد.", "ملک مورد نظر وجود ندارد.")
+    if not can_access_property(request.user, prop):
+        return _print_error(
+            request, 403, "دسترسی ندارید.", "شما به گزارش این ملک دسترسی ندارید."
         )
 
-        from .pdf import build_property_pdf
+    filters = {
+        "date_from": _parse_date(request.GET.get("date_from")),
+        "date_to": _parse_date(request.GET.get("date_to")),
+    }
+    filters = {k: v for k, v in filters.items() if v is not None}
+    report = cached_property_report(prop, filters=filters)
 
-        pdf_bytes = build_property_pdf(prop, report, request.user)
-        resp = HttpResponse(pdf_bytes, content_type="application/pdf")
-        resp["Content-Disposition"] = f'attachment; filename="property-report-{pid}.pdf"'
-        return resp
+    # Record the print in the activity log, mirroring the CSV export.
+    from apps.activity.activity import log_activity
+    from apps.activity.models import ActivityLog
+
+    log_activity(
+        user=request.user,
+        action=ActivityLog.ActionType.EXPORT,
+        target_type=ActivityLog.TargetType.PROPERTY,
+        target_id=prop.pk,
+        description=f"گزارش کامل ملک «{prop.title}» برای چاپ یا ذخیره PDF باز شد",
+        metadata={
+            "format": "print",
+            "property_id": prop.pk,
+            "date_from": request.GET.get("date_from"),
+            "date_to": request.GET.get("date_to"),
+        },
+    )
+
+    from django.template.response import TemplateResponse
+
+    from .printing import build_print_report_context
+
+    context = build_print_report_context(prop, report, request.user)
+    return TemplateResponse(request, "reports/print_report.html", context)
 
 
 class ConsultantScopeReportView(APIView):

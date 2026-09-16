@@ -33,7 +33,6 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
   const [dateFrom, setDateFrom] = useState<string>("");
   const [dateTo, setDateTo] = useState<string>("");
   const [exporting, setExporting] = useState(false);
-  const [exportingPdf, setExportingPdf] = useState(false);
 
   const load = useCallback(async () => {
     if (!propertyId) return;
@@ -84,33 +83,25 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
     }
   };
 
-  // PDF export: the server renders the full printed report (property info →
-  // KPIs → listings → follow-ups → charts → activity log). Consultants may
-  // only download it for their own or shared properties; the 403/404 Persian
-  // message from the API is surfaced as-is.
-  const handleExportPdf = async () => {
+  // PDF export: opens the server-rendered print page in a new tab. The page
+  // renders the full report (same scoped data and sections as the on-screen
+  // one) and opens the browser's native print dialog, where the user picks
+  // the destination — a real printer or «ذخیره به PDF» — with the usual
+  // pages/color controls. Access is enforced server-side exactly like the
+  // report itself (a denied request renders a short Persian error page in
+  // the new tab), and the print is logged to the activity feed there.
+  const handleExportPdf = () => {
     if (!propertyId) return;
-    setExportingPdf(true);
-    try {
-      const qs = new URLSearchParams();
-      if (dateFrom) qs.set("date_from", dateFrom);
-      if (dateTo) qs.set("date_to", dateTo);
-      const url = `/api/reports/properties/${propertyId}/export-pdf/${qs.toString() ? "?" + qs.toString() : ""}`;
-      const res = await fetch(url, { method: "GET", credentials: "same-origin" });
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        const message = err && typeof err === "object" && err.detail ? String(err.detail) : "خطا در تهیه خروجی PDF";
-        toast({ type: "error", message });
-        return;
-      }
-      const blob = await res.blob();
-      saveBlob(blob, `property-report-${propertyId}.pdf`);
-      toast({ type: "success", message: "خروجی PDF دریافت شد." });
-    } catch {
-      toast({ type: "error", message: "خطا در تهیه خروجی PDF" });
-    } finally {
-      setExportingPdf(false);
+    const qs = new URLSearchParams();
+    if (dateFrom) qs.set("date_from", dateFrom);
+    if (dateTo) qs.set("date_to", dateTo);
+    const url = `/reports/properties/${propertyId}/print/${qs.toString() ? "?" + qs.toString() : ""}`;
+    const win = window.open(url, "_blank", "noopener");
+    if (!win) {
+      toast({ type: "warning", message: "مرورگر اجازه باز کردن پنجره جدید را نداد؛ دسترسی pop-up را فعال کنید و دوباره تلاش کنید." });
+      return;
     }
+    toast({ type: "info", message: "صفحه چاپ گزارش باز شد؛ در پنجره پرینت مقصد را «ذخیره به PDF» یا پرینتر انتخاب کنید." });
   };
 
   if (!propertyId) {
@@ -132,7 +123,7 @@ function PropertyReportsPage({ csrfToken, propertyId, propertyPreview, onBack }:
         actions={
           <div className="flex gap-2">
             <Btn variant="ghost" size="sm" onClick={onBack}><ChevronRight size={13} />بازگشت به ملک</Btn>
-            <Btn variant="secondary" size="sm" onClick={handleExportPdf} disabled={exportingPdf || !data}><Download size={13} />{exportingPdf ? "در حال تهیه…" : "خروجی PDF"}</Btn>
+            <Btn variant="secondary" size="sm" onClick={handleExportPdf} disabled={!data}><Download size={13} />خروجی PDF</Btn>
             <Btn variant="secondary" size="sm" onClick={handleExport} disabled={exporting || !data}><Download size={13} />{exporting ? "در حال تهیه…" : "خروجی CSV"}</Btn>
           </div>
         }

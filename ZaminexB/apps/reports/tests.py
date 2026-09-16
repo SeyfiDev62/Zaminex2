@@ -1,14 +1,13 @@
 import csv
 import datetime
 import io
-import re
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import Client, TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -19,17 +18,7 @@ from apps.listings.models import Listing
 from apps.properties.models import Property
 from apps.tasks.models import Task
 
-from . import pdf as pdf_mod
 from .caching import cached_property_report
-from .pdf import (
-    _followups_section,
-    _listings_section,
-    _logs_section,
-    _styles,
-    _tasks_section,
-    build_property_pdf,
-    t,
-)
 from .services import compute_property_report, get_property_for_user_or_403
 
 User = get_user_model()
@@ -263,31 +252,33 @@ class ReportsAPITests(TestCase):
         self.assertEqual(data["kpis"]["propertyCount"], 1)
 
 
-class PropertyReportPdfExportTests(TestCase):
-    """PDF export of the full property report.
+class PropertyReportPrintTests(TestCase):
+    """Print-ready report page: the same access rule the PDF export had.
 
-    Access: admins may export any property; consultants may only export the
+    Access: admins may print any property; consultants may only print the
     properties they are assigned to or that are shared with them. Every
-    export must be recorded in the activity log like the CSV one.
+    successful print is recorded in the activity log like the CSV export;
+    a denied one is not. The page is plain HTML (the browser's native print
+    dialog turns it into paper or «Save as PDF»), never a binary download.
     """
 
     def setUp(self):
-        self.client = APIClient()
+        self.client = Client()
         self.admin = User.objects.create_user(
-            username="pdfadm", password="x" * 10, role=UserRole.ADMIN
+            username="pradm", password="x" * 10, role=UserRole.ADMIN
         )
         self.agent = User.objects.create_user(
-            username="pdfag1", password="x" * 10, role=UserRole.AGENT,
+            username="prag1", password="x" * 10, role=UserRole.AGENT,
             first_name="Sara", last_name="A",
         )
         ConsultantProfile.objects.create(user=self.agent, full_name="Sara A", branch="B")
         self.stranger = User.objects.create_user(
-            username="pdfag2", password="x" * 10, role=UserRole.AGENT
+            username="prag2", password="x" * 10, role=UserRole.AGENT
         )
         ConsultantProfile.objects.create(user=self.stranger, full_name="Ali B", branch="B")
         self.prop = Property.objects.create(
             title="Apt",
-            internal_code="P-1",
+            internal_code="PR-1",
             consultant=self.agent,
             property_type=Property.PropertyType.APARTMENT,
             deal_type=Property.DealType.SALE,
@@ -300,7 +291,7 @@ class PropertyReportPdfExportTests(TestCase):
         )
         self.shared = Property.objects.create(
             title="Villa shared",
-            internal_code="P-2",
+            internal_code="PR-2",
             consultant=self.agent,
             property_type=Property.PropertyType.VILLA,
             deal_type=Property.DealType.SALE,
@@ -312,53 +303,59 @@ class PropertyReportPdfExportTests(TestCase):
 
     @property
     def url(self):
-        return f"/api/reports/properties/{self.prop.pk}/export-pdf/"
+        return f"/reports/properties/{self.prop.pk}/print/"
 
-    def test_admin_can_export_pdf(self):
-        self.client.force_authenticate(user=self.admin)
+    def _html(self, res):
+        return res.content.decode("utf-8")
+
+    def test_admin_can_print_report(self):
+        self.client.force_login(self.admin)
         res = self.client.get(self.url)
         self.assertEqual(res.status_code, 200)
-        self.assertEqual(res["Content-Type"], "application/pdf")
-        self.assertIn("property-report-", res["Content-Disposition"])
-        self.assertTrue(res.content.startswith(b"%PDF-"))
-        self.assertGreater(len(res.content), 1000)
+        self.assertEqual(res["Content-Type"], "text/html; charset=utf-8")
+        html = self._html(res)
+        self.assertIn("گزارش کامل ملک", html)
+        self.assertIn("Apt", html)
+        self.assertNotIn("%PDF-", html)
 
-    def test_owner_consultant_can_export_pdf(self):
-        self.client.force_authenticate(user=self.agent)
+    def test_owner_consultant_can_print_report(self):
+        self.client.force_login(self.agent)
         res = self.client.get(self.url)
         self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.content.startswith(b"%PDF-"))
+        self.assertEqual(res["Content-Type"], "text/html; charset=utf-8")
 
-    def test_shared_property_exportable_by_other_consultant(self):
-        self.client.force_authenticate(user=self.stranger)
-        res = self.client.get(f"/api/reports/properties/{self.shared.pk}/export-pdf/")
-        self.assertEqual(res.status_code, 200, res.content[:200])
-        self.assertTrue(res.content.startswith(b"%PDF-"))
+    def test_shared_property_printable_by_other_consultant(self):
+        self.client.force_login(self.stranger)
+        res = self.client.get(f"/reports/properties/{self.shared.pk}/print/")
+        self.assertEqual(res.status_code, 200, self._html(res)[:200])
 
-    def test_stranger_cannot_export_non_shared(self):
-        self.client.force_authenticate(user=self.stranger)
+    def test_stranger_cannot_print_non_shared(self):
+        self.client.force_login(self.stranger)
         res = self.client.get(self.url)
         self.assertEqual(res.status_code, 403)
+        self.assertIn("دسترسی ندارید", self._html(res))
         self.assertFalse(
             ActivityLog.objects.filter(
                 action=ActivityLog.ActionType.EXPORT,
                 target_type=ActivityLog.TargetType.PROPERTY,
                 target_id=self.prop.pk,
             ).exists(),
-            "a denied export must not be logged",
+            "a denied print must not be logged",
         )
 
-    def test_anonymous_cannot_export(self):
+    def test_anonymous_is_redirected_to_login(self):
         res = self.client.get(self.url)
-        self.assertIn(res.status_code, [401, 403])
+        self.assertEqual(res.status_code, 302)
+        self.assertIn("/accounts/login/", res["Location"])
 
     def test_unknown_property_is_404(self):
-        self.client.force_authenticate(user=self.admin)
-        res = self.client.get("/api/reports/properties/999999/export-pdf/")
+        self.client.force_login(self.admin)
+        res = self.client.get("/reports/properties/999999/print/")
         self.assertEqual(res.status_code, 404)
+        self.assertIn("ملک مورد نظر وجود ندارد.", self._html(res))
 
-    def test_pdf_export_is_logged_in_activity(self):
-        self.client.force_authenticate(user=self.agent)
+    def test_print_report_is_logged_in_activity(self):
+        self.client.force_login(self.agent)
         res = self.client.get(self.url)
         self.assertEqual(res.status_code, 200)
 
@@ -367,37 +364,54 @@ class PropertyReportPdfExportTests(TestCase):
             target_type=ActivityLog.TargetType.PROPERTY,
             target_id=self.prop.pk,
         ).first()
-        self.assertIsNotNone(entry, "PDF export must be recorded in the activity log")
+        self.assertIsNotNone(entry, "a print must be recorded in the activity log")
         self.assertEqual(entry.user_id, self.agent.id)
-        self.assertEqual(entry.metadata.get("format"), "pdf")
+        self.assertEqual(entry.metadata.get("format"), "print")
+
+    def test_date_filters_are_forwarded(self):
+        """The same date window filters the print as the JSON/CSV exports."""
+        self.client.force_login(self.agent)
+        res = self.client.get(self.url + "?date_from=2020-01-01&date_to=2020-12-31")
+        self.assertEqual(res.status_code, 200)
+        entry = ActivityLog.objects.filter(
+            action=ActivityLog.ActionType.EXPORT, target_id=self.prop.pk
+        ).first()
+        self.assertEqual(entry.metadata.get("date_from"), "2020-01-01")
+        self.assertEqual(entry.metadata.get("date_to"), "2020-12-31")
 
 
 # ---------------------------------------------------------------------------
-#  Stage 9 — property PDF: empty-failure hardening + section layout + log tables
+#  Print page — content, empty states, AI policy, fonts
 # ---------------------------------------------------------------------------
 
-def _pdf_pages(data: bytes) -> int:
-    """Number of pages via the PDF page-tree ``/Count`` marker."""
-    match = re.search(rb"/Count\s+(\d+)", data)
-    return int(match.group(1)) if match else 0
+SECTION_HEADERS = [
+    "۱. اطلاعات ملک",
+    "۲. شاخص‌های کلیدی",
+    "۳. آگهی‌های ملک",
+    "۴. وظایف ملک",
+    "۵. پیگیری‌های ملک",
+    "۶. نمودارها",
+    "۷. سابقه و لاگ‌های ملک",
+]
 
 
-class PropertyPdfContentTests(TestCase):
-    """A fully-populated property renders a valid multi-page PDF."""
+class PropertyPrintContentTests(TestCase):
+    """A fully-populated property renders the complete print report —
+    every section, in order, with the property's own data."""
 
     def setUp(self):
-        self.client = APIClient()
+        self.client = Client()
         self.admin = User.objects.create_user(
-            username="pdfc-adm", password="x" * 10, role=UserRole.ADMIN
+            username="prc-adm", password="x" * 10, role=UserRole.ADMIN
         )
         self.agent = User.objects.create_user(
-            username="pdfc-ag", password="x" * 10, role=UserRole.AGENT,
+            username="prc-ag", password="x" * 10, role=UserRole.AGENT,
             first_name="Sara", last_name="A",
         )
         ConsultantProfile.objects.create(user=self.agent, full_name="Sara A", branch="B")
         self.prop = Property.objects.create(
             title="Populated",
-            internal_code="POP-1",
+            internal_code="PR-POP",
             consultant=self.agent,
             property_type=Property.PropertyType.APARTMENT,
             deal_type=Property.DealType.SALE,
@@ -408,6 +422,9 @@ class PropertyPdfContentTests(TestCase):
             neighborhood="N",
             latitude=Decimal("35.7"),
             longitude=Decimal("51.4"),
+            owner_first_name="Reza",
+            owner_last_name="Kh",
+            owner_phone="09120000000",
         )
         Listing.objects.create(
             property=self.prop, title="آگهی اصلی",
@@ -432,85 +449,48 @@ class PropertyPdfContentTests(TestCase):
             description="ملک ایجاد شد",
         )
 
-    def test_populated_property_renders_a_valid_multipage_pdf(self):
-        self.client.force_authenticate(user=self.admin)
-        res = self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
+    def _html(self):
+        res = self.client.get(f"/reports/properties/{self.prop.pk}/print/")
         self.assertEqual(res.status_code, 200, res.content[:200])
-        self.assertEqual(res["Content-Type"], "application/pdf")
-        self.assertTrue(res.content.startswith(b"%PDF-"))
-        self.assertGreaterEqual(_pdf_pages(res.content), 2)
-        self.assertGreater(len(res.content), 10_000)
+        return res.content.decode("utf-8")
 
-
-class PropertyPdfEmptyHistoryTests(TestCase):
-    """A property with no history still exports, with a per-table placeholder."""
-
-    def setUp(self):
-        self.client = APIClient()
-        self.admin = User.objects.create_user(
-            username="pdfe-adm", password="x" * 10, role=UserRole.ADMIN
-        )
-        self.agent = User.objects.create_user(
-            username="pdfe-ag", password="x" * 10, role=UserRole.AGENT,
-            first_name="E", last_name="A",
-        )
-        ConsultantProfile.objects.create(user=self.agent, full_name="E A", branch="B")
-        self.prop = Property.objects.create(
-            title="Empty",
-            internal_code="EMP-1",
-            consultant=self.agent,
-            property_type=Property.PropertyType.APARTMENT,
-            deal_type=Property.DealType.SALE,
-            area=80,
-            rooms=2,
-            address="addr",
-            neighborhood="N",
-        )
-
-    def test_empty_property_still_exports_a_valid_pdf(self):
-        self.client.force_authenticate(user=self.admin)
-        res = self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
-        self.assertEqual(res.status_code, 200, res.content[:200])
-        self.assertTrue(res.content.startswith(b"%PDF-"))
-        self.assertGreater(len(res.content), 1000)
-
-    def test_every_history_table_renders_its_placeholder(self):
-        """The four entity tables each emit their «no data» placeholder.
-
-        Extracting reshaped RTL text from a PDF is unreliable, so assert at the
-        story level: each section function must append its placeholder
-        paragraph to the story when the property has no rows.
-
-        A freshly-created property carries one activity event (its own
-        «created» log, written by the post_save signal), so that row is cleared
-        here to exercise the logs-table placeholder too.
-        """
-        ActivityLog.objects.filter(
-            target_type=ActivityLog.TargetType.PROPERTY, target_id=self.prop.pk
-        ).delete()
-
-        story = []
-        styles = _styles()
-        _listings_section(story, styles, self.prop)
-        _tasks_section(story, styles, self.prop)
-        _followups_section(story, styles, self.prop)
-        _logs_section(story, styles, self.prop)
-
-        rendered = [flow.text for flow in story if hasattr(flow, "text")]
-        for placeholder in (
-            "برای این ملک آگهی‌ای ثبت نشده است.",
-            "برای این ملک وظیفه‌ای ثبت نشده است.",
-            "برای این ملک پیگیری‌ای ثبت نشده است.",
-            "لاگ ثبت‌شده‌ای برای این ملک یافت نشد.",
+    def test_populated_property_renders_the_full_report(self):
+        self.client.force_login(self.admin)
+        html = self._html()
+        # Header + property facts (Persian digits, as in the old PDF). The
+        # internal code is the sequence-generated ZF_ code: Property.save()
+        # rewrites any code that is not already a ZF_ sequence member.
+        for token in (
+            "گزارش کامل ملک",
+            "Populated",
+            self.prop.internal_code,
+            "Sara A",
+            "Reza Kh",
+            "09120000000",
+            "۱۲۰ متر مربع",
         ):
-            self.assertIn(t(placeholder), rendered)
+            with self.subTest(token=token):
+                self.assertIn(token, html)
+        # Every record of the property
+        for token in ("آگهی اصلی", "بازدید مشتری", "پیگیری اول", "ملک ایجاد شد"):
+            with self.subTest(token=token):
+                self.assertIn(token, html)
+
+    def test_sections_are_complete_and_in_order(self):
+        self.client.force_login(self.admin)
+        html = self._html()
+        positions = []
+        for header in SECTION_HEADERS:
+            self.assertIn(header, html)
+            positions.append(html.index(header))
+        self.assertEqual(positions, sorted(positions))
 
     def test_legacy_english_log_rows_render_persian(self):
-        """Legacy rows holding raw English status codes render Persian in the PDF.
+        """Legacy rows holding raw English status codes render Persian.
 
-        ``t()`` passes pure ASCII through untouched, so if the shared
-        translator failed, the raw codes would remain literal ASCII in the
-        rendered text — the assertion below catches exactly that.
+        The shared translator (``apps.activity.labels``) rewrites the raw
+        codes before they reach the template; if it failed, the codes would
+        remain literal ASCII in the page — the assertion below catches that.
         """
         ActivityLog.objects.filter(
             target_type=ActivityLog.TargetType.PROPERTY, target_id=self.prop.pk
@@ -520,26 +500,90 @@ class PropertyPdfEmptyHistoryTests(TestCase):
             action="status_change",
             target_type="property",
             target_id=self.prop.pk,
-            description="وضعیت ملک «Empty» از AVAILABLE به RESERVED تغییر کرد",
+            description="وضعیت ملک «Populated» از AVAILABLE به RESERVED تغییر کرد",
+        )
+        self.client.force_login(self.admin)
+        html = self._html()
+        for token in ("AVAILABLE", "RESERVED", "Available", "Reserved"):
+            self.assertNotIn(token, html)
+        self.assertIn("آماده واگذاری", html)
+        self.assertIn("رزرو شده", html)
+
+
+class PropertyPrintEmptyHistoryTests(TestCase):
+    """A property with no history still renders, with a per-table placeholder."""
+
+    def setUp(self):
+        self.client = Client()
+        self.admin = User.objects.create_user(
+            username="pre-adm", password="x" * 10, role=UserRole.ADMIN
+        )
+        self.agent = User.objects.create_user(
+            username="pre-ag", password="x" * 10, role=UserRole.AGENT,
+            first_name="E", last_name="A",
+        )
+        ConsultantProfile.objects.create(user=self.agent, full_name="E A", branch="B")
+        self.prop = Property.objects.create(
+            title="Empty",
+            internal_code="PR-EMP",
+            consultant=self.agent,
+            property_type=Property.PropertyType.APARTMENT,
+            deal_type=Property.DealType.SALE,
+            area=80,
+            rooms=2,
+            address="addr",
+            neighborhood="N",
         )
 
-        story = []
-        styles = _styles()
-        _logs_section(story, styles, self.prop)
+    def test_empty_property_still_renders(self):
+        self.client.force_login(self.admin)
+        res = self.client.get(f"/reports/properties/{self.prop.pk}/print/")
+        self.assertEqual(res.status_code, 200)
+        html = res.content.decode("utf-8")
+        for header in SECTION_HEADERS:
+            self.assertIn(header, html)
 
-        rendered = [flow.text for flow in story if hasattr(flow, "text")]
-        joined = "\n".join(rendered)
-        for token in ("AVAILABLE", "RESERVED", "Available", "Reserved"):
-            self.assertNotIn(token, joined)
+    def test_history_tables_render_their_placeholders(self):
+        """Listings, tasks and follow-ups each emit their «no data» row.
+
+        The logs table is checked at the builder level instead (see below):
+        a successful HTTP print always appends its own activity row before
+        rendering, so over HTTP that table is never empty.
+        """
+        self.client.force_login(self.admin)
+        html = self.client.get(f"/reports/properties/{self.prop.pk}/print/").content.decode("utf-8")
+        for placeholder in (
+            "برای این ملک آگهی‌ای ثبت نشده است.",
+            "برای این ملک وظیفه‌ای ثبت نشده است.",
+            "برای این ملک پیگیری‌ای ثبت نشده است.",
+        ):
+            self.assertIn(placeholder, html)
+
+    def test_logs_builder_returns_no_rows_when_history_is_empty(self):
+        """The logs placeholder is exercised at the builder level.
+
+        A freshly-created property carries one activity event (its own
+        «created» log, written by the post_save signal), so that row is
+        cleared here.
+        """
+        from .printing import build_print_report_context
+
+        ActivityLog.objects.filter(
+            target_type=ActivityLog.TargetType.PROPERTY, target_id=self.prop.pk
+        ).delete()
+        context = build_print_report_context(
+            self.prop, compute_property_report(self.prop), self.admin
+        )
+        self.assertEqual(context["logs"], [])
 
 
 class _AiTripwire(BaseException):
-    """Raised when the PDF build reaches the AI layer; deliberately uncatchable
+    """Raised when the report build reaches the AI layer; deliberately uncatchable
     by an ``except Exception`` handler.
 
     The removed AI section guarded its cache read with ``except Exception``,
-    which is the right shape for production (an AI outage must never break an
-    export) but makes it the wrong shape for a test: any ``Exception``-derived
+    which is the right shape for production (an AI outage must never break a
+    report) but makes it the wrong shape for a test: any ``Exception``-derived
     tripwire is silently eaten, so the test would pass whether or not the
     pipeline was consulted. Deriving from ``BaseException`` puts the tripwire
     outside that handler, so reaching the AI layer aborts the build and fails
@@ -547,35 +591,34 @@ class _AiTripwire(BaseException):
     """
 
 
-class PropertyPdfHasNoAiSectionTests(TestCase):
+class PropertyPrintHasNoAiSectionTests(TestCase):
     """The printed report contains no AI description, at all.
 
     The AI summary stays on screen (the dashboards and the property detail
-    page) but was removed from the PDF: the printed document is a factual
-    record handed to customers and filed, so a model-written opinion does not
-    belong in it. Three different things have to hold, and each is a separate
-    failure mode, so each gets its own test:
+    page) but does not belong in the printed report: it is a factual record
+    handed to customers and filed, so a model-written opinion is excluded.
+    The same policy the PDF followed. Three things have to hold, and each is
+    a separate failure mode, so each gets its own test:
 
     * the build never reaches the AI pipeline — not even the read-only cache
-      peek it used to do (that is the *root* of the removal, and it is what
-      keeps a future re-introduction from being silent);
+      peek it used to do (that is the *root* of the exclusion);
     * a cached description cannot leak in through some other path;
-    * the remaining sections are renumbered ۱..۷ with no gap left behind.
+    * the sections run ۱..۷ in order, with no gap and no AI section.
     """
 
     def setUp(self):
-        self.client = APIClient()
+        self.client = Client()
         self.admin = User.objects.create_user(
-            username="pdfai-adm", password="x" * 10, role=UserRole.ADMIN
+            username="prai-adm", password="x" * 10, role=UserRole.ADMIN
         )
         self.agent = User.objects.create_user(
-            username="pdfai-ag", password="x" * 10, role=UserRole.AGENT,
+            username="prai-ag", password="x" * 10, role=UserRole.AGENT,
             first_name="A", last_name="I",
         )
         ConsultantProfile.objects.create(user=self.agent, full_name="A I", branch="B")
         self.prop = Property.objects.create(
             title="AI Prop",
-            internal_code="AI-1",
+            internal_code="PR-AI",
             consultant=self.agent,
             property_type=Property.PropertyType.APARTMENT,
             deal_type=Property.DealType.SALE,
@@ -585,47 +628,46 @@ class PropertyPdfHasNoAiSectionTests(TestCase):
             neighborhood="N",
         )
 
-    def _export(self):
-        self.client.force_authenticate(user=self.admin)
-        return self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
+    def _url(self):
+        return f"/reports/properties/{self.prop.pk}/print/"
 
-    def _pdf_size(self):
-        return len(build_property_pdf(self.prop, cached_property_report(self.prop), self.admin))
-
-    def test_export_never_consults_the_ai_pipeline(self):
-        # Every entry point into the AI layer is rigged to blow up. A PDF
-        # export that still succeeds therefore provably touches none of them —
+    def test_report_never_consults_the_ai_pipeline(self):
+        # Every entry point into the AI layer is rigged to blow up. A report
+        # that still succeeds therefore provably touches none of them —
         # neither the read-only cache peek the old section used, nor the
-        # description assembler behind it, nor (obviously) a live model call,
-        # which could outlast the request timeout and truncate the response
-        # into a zero-byte, unopenable PDF.
+        # description assembler behind it, nor a live model call.
         #
         # The tripwire derives from BaseException, not Exception, and that is
         # load-bearing: the section this replaced wrapped its whole AI read in
         # ``try: … except Exception: return``, so an AssertionError raised here
-        # would be swallowed and the test would pass either way. Verified by
-        # mutation — re-adding the old section fails this test only with a
-        # BaseException-derived tripwire.
-        boom = _AiTripwire("the PDF export must not touch the AI pipeline")
+        # would be swallowed and the test would pass either way.
+        boom = _AiTripwire("the print report must not touch the AI pipeline")
         with mock.patch("apps.analytics.views._property_ai_data", side_effect=boom), \
              mock.patch("apps.analytics.ai_service.peek_cached_description", side_effect=boom), \
              mock.patch("apps.analytics.ai_service.get_cached_description", side_effect=boom), \
              mock.patch("apps.analytics.ai_service.generate_description", side_effect=boom):
-            res = self._export()
+            self.client.force_login(self.admin)
+            res = self.client.get(self._url())
 
         self.assertEqual(res.status_code, 200, res.content[:200])
-        self.assertEqual(res["Content-Type"], "application/pdf")
-        self.assertTrue(res.content.startswith(b"%PDF-"))
+        self.assertEqual(res["Content-Type"], "text/html; charset=utf-8")
 
-    def test_cached_description_changes_nothing_in_the_pdf(self):
-        # Compared at the build level (no HTTP), because every HTTP export
+    def test_cached_description_changes_nothing_in_the_report(self):
+        # Compared at the builder level (no HTTP), because every HTTP request
         # appends a new activity-log row and would confound the delta.
         #
-        # This is the byte-level complement to the test above: even with a
-        # fully-formed description sitting in the cache, the document is the
-        # same size, so nothing about it can have reached the page.
-        base_size = self._pdf_size()
+        # This is the data-level complement to the test above: even with a
+        # fully-formed description sitting in the cache, every section of the
+        # context is byte-identical, so nothing about it can have reached the
+        # page.
+        from .printing import build_print_report_context
 
+        def _context():
+            return build_print_report_context(
+                self.prop, cached_property_report(self.prop), self.admin
+            )
+
+        base = _context()
         with mock.patch(
             "apps.analytics.ai_service.peek_cached_description",
             return_value={
@@ -640,93 +682,75 @@ class PropertyPdfHasNoAiSectionTests(TestCase):
                 ),
             },
         ):
-            enriched_size = self._pdf_size()
+            enriched = _context()
 
-        self.assertEqual(enriched_size, base_size)
+        for key in (
+            "header_title",
+            "property_info",
+            "kpis",
+            "listings",
+            "tasks",
+            "followups",
+            "charts",
+            "logs",
+        ):
+            with self.subTest(section=key):
+                self.assertEqual(enriched[key], base[key])
 
     def test_section_numbering_has_no_gap_after_the_removal(self):
-        """Sections run ۱..۷ and none of them is the AI description.
-
-        Asserted by recording the titles handed to ``_section_header`` rather
-        than by reading the PDF: the rendered text is reshaped and bidi-flipped,
-        so extracting it back reliably is not possible. This also pins the
-        *order*, which is the part a partial edit is most likely to break —
-        dropping the section without renumbering would leave a document that
-        jumps from «۲. شاخص‌های کلیدی» straight to «۴. آگهی‌های ملک».
+        """Sections run ۱..۷ in order, and none of them is the AI description.
 
         The build runs with a description sitting in the cache. That matters:
         the old section emitted its header *only* when one was present, so
         without this a reintroduced AI section would stay invisible on an
         empty cache and the assertion would pass vacuously.
         """
-        seen: list[str] = []
-        real_header = pdf_mod._section_header
+        with mock.patch(
+            "apps.analytics.ai_service.peek_cached_description",
+            return_value={
+                "positives": ["موقعیت مکانی مناسب"],
+                "negatives": ["روزهای حضور در بازار زیاد است"],
+                "summary": "خلاصه‌ی ساختگی برای این تست.",
+            },
+        ):
+            self.client.force_login(self.admin)
+            res = self.client.get(self._url())
 
-        def spy(story, styles, text):
-            seen.append(text)
-            return real_header(story, styles, text)
-
-        with mock.patch.object(pdf_mod, "_section_header", side_effect=spy), \
-             mock.patch(
-                 "apps.analytics.ai_service.peek_cached_description",
-                 return_value={
-                     "positives": ["موقعیت مکانی مناسب"],
-                     "negatives": ["روزهای حضور در بازار زیاد است"],
-                     "summary": "خلاصه‌ی ساختگی برای این تست.",
-                 },
-             ):
-            build_property_pdf(self.prop, cached_property_report(self.prop), self.admin)
-
-        self.assertEqual(
-            seen,
-            [
-                "۱. اطلاعات ملک",
-                "۲. شاخص‌های کلیدی",
-                "۳. آگهی‌های ملک",
-                "۴. وظایف ملک",
-                "۵. پیگیری‌های ملک",
-                "۶. نمودارها",
-                "۷. سابقه و لاگ‌های ملک",
-            ],
-        )
-        self.assertFalse(
-            any("هوش مصنوعی" in title for title in seen),
-            "the AI section must not come back into the printed report",
-        )
+        html = res.content.decode("utf-8")
+        positions = []
+        for header in SECTION_HEADERS:
+            self.assertIn(header, html)
+            positions.append(html.index(header))
+        self.assertEqual(positions, sorted(positions))
+        self.assertNotIn("توصیف هوش مصنوعی", html)
+        self.assertNotIn("خلاصه‌ی ساختگی برای این تست.", html)
 
 
+class PropertyPrintFontTests(TestCase):
+    """The print document is built to render in the project's IRAN font —
+    the same files the SPA loads. A missing font file would silently degrade
+    the document to a system font, so pin both the files and the reference.
+    """
 
-class PropertyPdfFontFailureTests(TestCase):
-    """A missing/corrupt font is a clean 500 with a Persian detail — never an
-    empty PDF."""
-
-    FONT_REL = Path("static") / "fonts" / "ttf" / "IRAN-Rounded.ttf"
-
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.font_path = Path(settings.BASE_DIR) / cls.FONT_REL
-        cls._original_bytes = cls.font_path.read_bytes()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.font_path.write_bytes(cls._original_bytes)
-        pdf_mod._font_registered = False
-        super().tearDownClass()
+    FONT_FILES = (
+        "fonts/eot/IRAN-Rounded.eot",
+        "fonts/woff/IRAN-Rounded.woff",
+        "fonts/ttf/IRAN-Rounded.ttf",
+    )
 
     def setUp(self):
-        self.client = APIClient()
+        self.client = Client()
         self.admin = User.objects.create_user(
-            username="pdff-adm", password="x" * 10, role=UserRole.ADMIN
+            username="prf-adm", password="x" * 10, role=UserRole.ADMIN
         )
         self.agent = User.objects.create_user(
-            username="pdff-ag", password="x" * 10, role=UserRole.AGENT,
+            username="prf-ag", password="x" * 10, role=UserRole.AGENT,
             first_name="F", last_name="A",
         )
         ConsultantProfile.objects.create(user=self.agent, full_name="F A", branch="B")
         self.prop = Property.objects.create(
             title="Font Prop",
-            internal_code="FNT-1",
+            internal_code="PR-FNT",
             consultant=self.agent,
             property_type=Property.PropertyType.APARTMENT,
             deal_type=Property.DealType.SALE,
@@ -735,47 +759,32 @@ class PropertyPdfFontFailureTests(TestCase):
             address="addr",
             neighborhood="N",
         )
-        # Force the next export to (re)load the font from disk.
-        pdf_mod._font_registered = False
 
-    def _export(self):
-        self.client.force_authenticate(user=self.admin)
-        return self.client.get(f"/api/reports/properties/{self.prop.pk}/export-pdf/")
-
-    def test_missing_font_is_a_clean_500(self):
-        self.font_path.unlink()
-        try:
-            res = self._export()
-            self.assertEqual(res.status_code, 500)
-            self.assertEqual(res.json()["code"], "report_font_unavailable")
-            self.assertIn("فونت", res.json()["detail"])
-            self.assertFalse(res.content.startswith(b"%PDF-"))
-        finally:
-            self.font_path.write_bytes(self._original_bytes)
-
-    def test_corrupted_font_is_a_clean_500(self):
-        corrupted = self._original_bytes.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
-        self.font_path.write_bytes(corrupted)
-        try:
-            res = self._export()
-            self.assertEqual(res.status_code, 500)
-            self.assertEqual(res.json()["code"], "report_font_unavailable")
-            self.assertIn("فونت", res.json()["detail"])
-            self.assertFalse(res.content.startswith(b"%PDF-"))
-        finally:
-            self.font_path.write_bytes(self._original_bytes)
+    def test_font_files_exist_and_are_referenced(self):
+        for rel in self.FONT_FILES:
+            with self.subTest(font=rel):
+                self.assertTrue(
+                    (Path(settings.BASE_DIR) / "static" / rel).is_file(),
+                    f"the print report depends on the font file {rel}",
+                )
+        self.client.force_login(self.admin)
+        html = self.client.get(f"/reports/properties/{self.prop.pk}/print/").content.decode("utf-8")
+        self.assertIn("IRANRounded", html)
+        for rel in self.FONT_FILES:
+            with self.subTest(font=rel):
+                self.assertIn(rel, html)
 
 
 # ---------------------------------------------------------------------------
-#  Stage 10 — consultants may report on their own AND shared properties
+#  Access matrix — consultants may report on their own AND shared properties
 # ---------------------------------------------------------------------------
 
 class PropertyReportAccessMatrixTests(TestCase):
-    """One canonical access rule across JSON, CSV and PDF.
+    """One canonical access rule across JSON, CSV and the print page.
 
     A consultant may report on a property they own or that is shared with
     them (``is_shared``); anything else is 403. Admin sees everything. The
-    three formats must agree on the same status for every (user, property).
+    entry points must agree on the same status for every (user, property).
     """
 
     @classmethod
@@ -811,11 +820,14 @@ class PropertyReportAccessMatrixTests(TestCase):
     def _statuses(self, user, prop):
         client = APIClient()
         client.force_authenticate(user=user)
-        return (
-            client.get(f"/api/reports/properties/{prop.pk}/").status_code,
-            client.get(f"/api/reports/properties/{prop.pk}/export/").status_code,
-            client.get(f"/api/reports/properties/{prop.pk}/export-pdf/").status_code,
-        )
+        json_status = client.get(f"/api/reports/properties/{prop.pk}/").status_code
+        csv_status = client.get(f"/api/reports/properties/{prop.pk}/export/").status_code
+        # The print page is a plain Django view with session auth, so it needs
+        # a session login rather than DRF's force_authenticate.
+        html_client = Client()
+        html_client.force_login(user)
+        print_status = html_client.get(f"/reports/properties/{prop.pk}/print/").status_code
+        return json_status, csv_status, print_status
 
     def test_access_matrix_is_consistent_across_formats(self):
         matrix = [
@@ -831,18 +843,18 @@ class PropertyReportAccessMatrixTests(TestCase):
         ]
         for user, prop, expected in matrix:
             with self.subTest(user=user.username, property=prop.internal_code):
-                json_status, csv_status, pdf_status = self._statuses(user, prop)
+                json_status, csv_status, print_status = self._statuses(user, prop)
                 self.assertEqual(json_status, expected)
                 self.assertEqual(csv_status, expected)
-                self.assertEqual(pdf_status, expected)
+                self.assertEqual(print_status, expected)
                 # The consistency assertion is the point of this stage.
                 self.assertEqual(json_status, csv_status)
-                self.assertEqual(csv_status, pdf_status)
+                self.assertEqual(csv_status, print_status)
 
     def test_admin_can_access_every_property(self):
         for prop in (self.p1, self.p2, self.p3):
             with self.subTest(property=prop.internal_code):
-                json_status, csv_status, pdf_status = self._statuses(self.admin, prop)
+                json_status, csv_status, print_status = self._statuses(self.admin, prop)
                 self.assertEqual(json_status, 200)
                 self.assertEqual(csv_status, 200)
-                self.assertEqual(pdf_status, 200)
+                self.assertEqual(print_status, 200)
