@@ -379,6 +379,28 @@ class PropertyReportPrintTests(TestCase):
         self.assertEqual(entry.metadata.get("date_from"), "2020-01-01")
         self.assertEqual(entry.metadata.get("date_to"), "2020-12-31")
 
+    def test_print_report_header_and_footer_customization(self):
+        """The print report renders Shamsi date in @top-left, CRM title in @bottom-left,
+        preserves page counter in @bottom-right, and removes the body footer section."""
+        self.client.force_login(self.admin)
+        res = self.client.get(self.url)
+        self.assertEqual(res.status_code, 200)
+        html = self._html(res)
+
+        # 1. The old body footer with horizontal rule is completely removed
+        self.assertNotIn('<footer class="print-footer">', html)
+        self.assertNotIn(".print-footer", html)
+
+        # 2. @page margin boxes configure top-left Shamsi date & time
+        self.assertIn("@top-left", html)
+        self.assertIn('id="doc-meta-generated-at"', html)
+
+        # 3. @page margin boxes configure bottom-left title (replacing URL) and bottom-right page counter
+        self.assertIn("@bottom-left", html)
+        self.assertIn("ساخته شده توسط CRM زمینکس", html)
+        self.assertIn("@bottom-right", html)
+        self.assertIn("counter(page)", html)
+
 
 # ---------------------------------------------------------------------------
 #  Print page — content, empty states, AI policy, fonts
