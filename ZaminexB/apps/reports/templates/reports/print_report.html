@@ -6,7 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     {# The tab title doubles as the default «Save as PDF» file name. #}
     <title>گزارش کامل ملک — {{ property.title }}</title>
-    <style>
+    <style id="print-page-style">
         /* The project's own Persian font — the same family the SPA uses, so
            the printed document looks exactly like the screen. */
         @font-face {
@@ -85,7 +85,6 @@
             padding: 44px 52px;
             box-shadow: 0 1px 10px rgba(15, 23, 42, 0.12);
         }
-        .print-footer { display: none; }
 
         /* ── the document ──────────────────────────────────────────────── */
         .doc-company { color: var(--faint); font-size: 12px; }
@@ -145,22 +144,45 @@
         .bar-fill { height: 100%; border-radius: 6px; }
         .bar-value { width: 64px; font-size: 11.5px; text-align: left; color: var(--muted); }
 
-        /* Repeated on every printed page: the browser repeats position:fixed
-           elements per page. The extra bottom page margin keeps it clear of
-           the content. */
-        .print-footer {
-            position: fixed;
-            bottom: 3mm;
-            left: 0;
-            right: 0;
-            font-size: 10px;
-            color: var(--empty);
-            border-top: 0.5px solid var(--grid);
-            padding-top: 2mm;
+        /* ── print ─────────────────────────────────────────────────────── */
+        @page {
+            size: A4;
+            margin: 14mm 12mm 18mm 12mm;
+
+            @top-left-corner { content: ""; }
+            @top-left {
+                content: "{{ generated_at }}";
+                font-family: IRANRounded, Tahoma, sans-serif;
+                font-size: 8.5pt;
+                color: #64748B;
+                direction: ltr;
+                vertical-align: middle;
+            }
+            @top-center { content: ""; }
+            @top-right { content: ""; }
+            @top-right-corner { content: ""; }
+
+            @bottom-left-corner { content: ""; }
+            @bottom-left {
+                content: "ساخته شده توسط CRM زمینکس";
+                font-family: IRANRounded, Tahoma, sans-serif;
+                font-size: 8.5pt;
+                color: #94A3B8;
+                direction: rtl;
+                vertical-align: middle;
+            }
+            @bottom-center { content: ""; }
+            @bottom-right {
+                content: counter(page) " / " counter(pages);
+                font-family: IRANRounded, Tahoma, sans-serif;
+                font-size: 8.5pt;
+                color: #94A3B8;
+                direction: ltr;
+                vertical-align: middle;
+            }
+            @bottom-right-corner { content: ""; }
         }
 
-        /* ── print ─────────────────────────────────────────────────────── */
-        @page { size: A4; margin: 14mm 12mm 18mm 12mm; }
         @media print {
             body { background: #fff; font-size: 11px; }
             .toolbar { display: none; }
@@ -171,7 +193,6 @@
                 box-shadow: none;
             }
             .section { margin-top: 16px; }
-            .print-footer { display: block; }
             .section-title { break-after: avoid-page; }
             .chart { break-inside: avoid; }
             tr { break-inside: avoid; }
@@ -195,7 +216,7 @@
         <div class="doc-company">{{ company_name }}</div>
         <h1 class="doc-title">گزارش کامل ملک</h1>
         <div class="doc-subtitle">{{ header_title }}</div>
-        <div class="doc-meta">تاریخ تهیه: {{ generated_at }}&nbsp;&nbsp;|&nbsp;&nbsp;تهیه‌کننده: {{ exporter }}</div>
+        <div class="doc-meta">تاریخ تهیه: <span id="doc-meta-generated-at">{{ generated_at }}</span>&nbsp;&nbsp;|&nbsp;&nbsp;تهیه‌کننده: {{ exporter }}</div>
         <hr class="doc-rule">
     </header>
 
@@ -334,8 +355,6 @@
         {% endif %}
     </section>
 </main>
-
-<footer class="print-footer">ساخته‌شده توسط CRM زمینکس</footer>
 
 <script src="{% static 'reports/print_report.js' %}"></script>
 </body>
